@@ -1,0 +1,123 @@
+# Node and frontend dependencies
+node_modules/
+
+# Build artifacts
+dist/
+.tsbuild/
+*.tsbuildinfo
+
+# Logs and runtime data
+logs/
+*.log
+*.rdb
+
+# Python
+__pycache__/
+*.py[cod]
+$py.class
+.mypy_cache/
+.pytest_cache/
+venv/
+.venv/
+env/
+ENV/
+pip-wheel-metadata/
+*.egg-info/
+dist-packages/
+*.egg
+poetry.lock
+
+# Databases and runtime files and db lock suffix
+*.sqlite3
+*.sqlite
+*.db
+*.db.lock
+
+# macOS
+.DS_Store
+
+# Editors/IDEs
+/.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Temporary/backup
+*.swp
+*~
+*.bak
+*.old
+*.orig
+*.prev
+*.save
+*.tmp
+*.temp
+
+# build / runtime
+out/
+build/
+runtime/
+
+# LLM / large files
+llama-cpp/
+models/
+pretrained/
+
+# Service runtimes
+redis-server/
+mongodb/
+milvus/
+
+# Misc
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json~
+
+# Ignore GitHub workflows cache or metadata (keep repo config tracked)
+# .github/  # intentionally tracked
+
+# Model weight files
+*.gguf
+*.bin
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+*.onnx
+*.pb
+*.tflite
+*.weights
+
+# Benchmark results (keep runner code)
+benchmark/results/
+benchmark/*.log
+benchmark/data/
+
+
+# always ignore python cache everywhere
+__pycache__/
+*.py[cod]
+
+release/
+
+package-lock.json
+
+# never save local and prod config, but dev��test configs can be shared
+.env.local
+.env.prod
+
+# Husky internal files (keep hooks like pre-commit tracked)
+.husky/
+
+# Certificates and security keys (should not be committed)
+assets/certs/
+*.csr
+*.key
+*.pem
+*.crt
+*.cert
+*.p12
+*.pfx
+
+profiling/

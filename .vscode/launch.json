@@ -1,0 +1,59 @@
+{
+    "version": "0.3.0",
+    "configurations": [
+        {
+            "name": "Debugger: Current File",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "console": "integratedTerminal"
+        },
+        {
+            "name": "Debugger: Main",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "env": {
+                "ENV": "dev",                    // default to be dev environment
+                "DEBUG": "true",                 // to enable reload for debuggging
+            },
+            "console": "integratedTerminal",
+            "justMyCode": false
+        },
+        {
+            "name": "Debugger: Build",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/scripts/build.py",
+            "console": "integratedTerminal",
+            "windows": { // Windows-specific properties
+                "args": [
+                    "--root_dir", 
+                    ".",          
+                    "--platform",
+                    "win",
+                    "--mode",
+                    "dev",
+                    "--output_dir",
+                    "${workspaceFolder}/dist",
+                    "--no-cache",
+                    "true",
+                ]
+            },
+            "osx": { // macOS-specific properties
+                "args": [
+                    "--root_dir",
+                    ".",
+                    "--platform",
+                    "mac",
+                    "--mode",
+                    "dev",
+                    "--output_dir",
+                    "${workspaceFolder}/dist",
+                    "--no-cache",
+                    "false",
+                ]
+            }
+        },
+    ]
+}

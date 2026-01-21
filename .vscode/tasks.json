@@ -1,0 +1,15 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Lint Python (Flake8)",
+            "type": "shell",
+            "command": "./.venv/bin/flake8 app --max-line-length=120 --ignore=E203,W503",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        }
+    ]
+}
