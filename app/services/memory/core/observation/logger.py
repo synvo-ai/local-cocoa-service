@@ -1,0 +1,262 @@
+import logging
+import traceback
+from typing import Optional
+from enum import Enum
+from functools import lru_cache
+import sys
+import os
+
+from core.config import settings
+from .log_sanitizer import SanitizingFormatter
+
+
+class LogLevel(Enum):
+    """Log level enumeration"""
+
+    DEBUG = "DEBUG"
+    INFO = "INFO"
+    WARNING = "WARNING"
+    ERROR = "ERROR"
+    CRITICAL = "CRITICAL"
+
+
+class LoggerProvider:
+    """Unified logging management class - hybrid mode + LRU cache optimization"""
+
+    _instance: Optional['LoggerProvider'] = None
+    _initialized: bool = False
+
+    def __new__(cls) -> 'LoggerProvider':
+        """Singleton pattern implementation"""
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __init__(self):
+        """Initialize the logger provider"""
+        if not self._initialized:
+            self._setup_logging()
+            self._initialized = True
+
+    def _setup_root_logging(self):
+        """Set up logging configuration with privacy-protecting sanitization"""
+        # Create sanitizing formatter for privacy protection
+        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+        sanitizing_formatter = SanitizingFormatter(log_format)
+
+        # Create handler with sanitizing formatter
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setFormatter(sanitizing_formatter)
+
+        # Configure root logger with sanitizing handler
+        logging.basicConfig(
+            level=getattr(logging, settings.log_level),
+            handlers=[console_handler],
+        )
+
+    def _setup_file_logging(self, log_path: str):
+        """Set up file logging with rotation and sanitization"""
+        try:
+            log_dir = os.path.dirname(log_path)
+            if log_dir:
+                os.makedirs(log_dir, exist_ok=True)
+            
+            from logging.handlers import RotatingFileHandler
+            file_handler = RotatingFileHandler(
+                log_path,
+                maxBytes=10 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8"
+            )
+            log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
+            sanitizing_formatter = SanitizingFormatter(log_format)
+            file_handler.setFormatter(sanitizing_formatter)
+            
+            logging.getLogger().addHandler(file_handler)
+        except Exception as e:
+            print(f"Failed to setup file logging at {log_path}: {e}", file=sys.stderr)
+
+    def _disable_noisy_loggers(self):
+        """Disable redundant logs from third-party libraries"""
+        logging.getLogger('urllib3').setLevel(logging.WARNING)
+        logging.getLogger('google').setLevel(logging.WARNING)
+        logging.getLogger('googleapiclient').setLevel(logging.WARNING)
+        logging.getLogger('httpx').setLevel(logging.WARNING)
+        logging.getLogger('hpack').setLevel(logging.WARNING)
+        logging.getLogger('httpcore').setLevel(logging.WARNING)
+        logging.getLogger('pymongo').setLevel(logging.WARNING)
+        logging.getLogger('aiokafka').setLevel(logging.WARNING)
+
+    def _setup_logging(self):
+        """Set up logging configuration"""
+        # Clear existing handlers to allow reconfiguration
+        root_logger = logging.getLogger()
+        for handler in root_logger.handlers[:]:
+            root_logger.removeHandler(handler)
+
+        self._setup_root_logging()
+
+        if settings.log_to_file:
+            self._setup_file_logging(settings.main_log_path)
+
+        self._disable_noisy_loggers()
+
+    @lru_cache(maxsize=1000)
+    def _get_cached_logger(self, module_name: str) -> logging.Logger:
+        """Get cached logger (LRU cache, up to 1000)
+
+        Args:
+            module_name: Module name
+
+        Returns:
+            logging.Logger: Cached logger instance
+        """
+        return logging.getLogger(f'{module_name}')
+
+    def get_logger(self, name: Optional[str] = None) -> logging.Logger:
+        """Get logger with specified name (recommended usage: explicitly pass module name)
+
+        Args:
+            name: Logger name, if None uses caller's module name (lower performance)
+
+        Returns:
+            logging.Logger: Logger instance
+        """
+        if name is None:
+            # Get caller's module name (convenient but lower performance)
+            frame = sys._getframe(1)
+            name = frame.f_globals.get('__name__', 'unknown')
+
+        # Use LRU cache to avoid repeatedly creating logger
+        return self._get_cached_logger(name)
+
+    def debug(self, message: str, *args, **kwargs):
+        """Log debug information"""
+        logger = self._get_caller_logger()
+        logger.debug(message, *args, **kwargs)
+
+    def info(self, message: str, *args, **kwargs):
+        """Log information"""
+        logger = self._get_caller_logger()
+        logger.info(message, *args, **kwargs)
+
+    def warning(self, message: str, *args, **kwargs):
+        """Log warning"""
+        logger = self._get_caller_logger()
+        logger.warning(message, *args, **kwargs)
+
+    def warn(self, message: str, *args, **kwargs):
+        """Log warning (alias)"""
+        self.warning(message, *args, **kwargs)
+
+    def error(self, message: str, exc_info: bool = True, *args, **kwargs):
+        """Log error information
+
+        Args:
+            message: Error message
+            exc_info: Whether to include exception stack trace, default True
+        """
+        logger = self._get_caller_logger()
+        logger.error(message, exc_info=exc_info, *args, **kwargs)
+
+    def exception(self, message: str, exc_info: bool = True, *args, **kwargs):
+        """Log exception information (automatically includes stack trace)
+
+        Args:
+            message: Exception message
+            exc_info: Whether to include exception stack trace, default True
+        """
+        logger = self._get_caller_logger()
+        logger.exception(message, exc_info=exc_info, *args, **kwargs)
+
+    def critical(self, message: str, exc_info: bool = True, *args, **kwargs):
+        """Log critical error information
+
+        Args:
+            message: Error message
+            exc_info: Whether to include exception stack trace, default True
+        """
+        logger = self._get_caller_logger()
+        logger.critical(message, exc_info=exc_info, *args, **kwargs)
+
+    def log_with_stack(self, level: LogLevel, message: str):
+        """Log with full stack trace
+
+        Args:
+            level: Log level
+            message: Log message
+        """
+        logger = self._get_caller_logger()
+        stack_trace = traceback.format_stack()
+        full_message = f"{message}\nStack trace:\n{''.join(stack_trace)}"
+
+        log_method = getattr(logger, level.value.lower())
+        log_method(full_message)
+
+    def _get_caller_logger(self) -> logging.Logger:
+        """Get caller's logger (with LRU cache optimization)"""
+        frame = sys._getframe(2)  # Skip current method and the called logging method
+        module_name = frame.f_globals.get('__name__', 'unknown')
+        # Use LRU cache to avoid repeatedly creating logger
+        return self._get_cached_logger(module_name)
+
+
+# Create global logger provider instance
+logger_provider = LoggerProvider()
+
+# Hybrid mode interface: provide two usage methods
+
+
+# Method 1: High-performance usage (recommended) - explicitly get logger, suitable for frequent calls
+def get_logger(name: Optional[str] = None) -> logging.Logger:
+    """Get logger (recommended usage: explicitly pass __name__)
+
+    Recommended usage:
+        logger = get_logger(__name__)  # Get once at module top
+        logger.info("High-frequency log calls")    # Use directly afterwards
+
+    Args:
+        name: Module name, recommended to pass __name__. If None, automatically get (lower performance)
+    """
+    return logger_provider.get_logger(name)
+
+
+# Method 2: Convenient usage - directly call functions, suitable for occasional calls (with LRU cache optimization)
+def debug(message: str, *args, **kwargs):
+    """Log debug information (convenient usage, suitable for occasional calls)"""
+    logger_provider.debug(message, *args, **kwargs)
+
+
+def info(message: str, *args, **kwargs):
+    """Log information (convenient usage, suitable for occasional calls)"""
+    logger_provider.info(message, *args, **kwargs)
+
+
+def warning(message: str, *args, **kwargs):
+    """Log warning (convenient usage, suitable for occasional calls)"""
+    logger_provider.warning(message, *args, **kwargs)
+
+
+def warn(message: str, *args, **kwargs):
+    """Log warning (alias)"""
+    logger_provider.warn(message, *args, **kwargs)
+
+
+def error(message: str, exc_info: bool = True, *args, **kwargs):
+    """Log error information (automatically includes stack trace)"""
+    logger_provider.error(message, exc_info=exc_info, *args, **kwargs)
+
+
+def exception(message: str, exc_info: bool = True, *args, **kwargs):
+    """Log exception information (automatically includes stack trace)"""
+    logger_provider.exception(message, exc_info=exc_info, *args, **kwargs)
+
+
+def critical(message: str, exc_info: bool = True, *args, **kwargs):
+    """Log critical error information (automatically includes stack trace)"""
+    logger_provider.critical(message, exc_info=exc_info, *args, **kwargs)
+
+
+def log_with_stack(level: LogLevel, message: str):
+    """Log with full stack trace"""
+    logger_provider.log_with_stack(level, message)
