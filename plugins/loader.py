@@ -14,6 +14,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any, TYPE_CHECKING
 
+from core.config import settings
+
 if TYPE_CHECKING:
     from fastapi import FastAPI, APIRouter
 
@@ -75,24 +77,24 @@ class PluginLoader:
     in the same plugins/ directory for simplicity.
     """
     
-    PLUGINS_DIR = "plugins"
     MANIFEST_NAME = "plugin.json"
     
-    def __init__(self, base_dir: Path, user_data_dir: Optional[Path] = None):
+    def __init__(self, sys_plugs_dir: Path, user_plugs_dir: Optional[Path] = None):
         """
         Initialize the plugin loader.
         
         Args:
-            base_dir: Base directory of the application (where plugins/ directory is)
-            user_data_dir: Not used anymore, kept for backwards compatibility
+            sys_plugs_dir: System plugins root directory of the application
+            user_plugs_dir: User plugins (downloadable) root directory of the application
         """
-        self.base_dir = Path(base_dir)
-        self.plugins_path = self.base_dir / self.PLUGINS_DIR
+        self.plugins_path_list = [sys_plugs_dir]
+        if user_plugs_dir:
+            self.plugins_path_list.append(user_plugs_dir)
         
         self.plugins: Dict[str, PluginMetadata] = {}
         self._original_sys_path: List[str] = []
         
-        logger.info(f"PluginLoader initialized. Plugins directory: {self.plugins_path}")
+        logger.info(f"PluginLoader initialized. Plugins directory: {self.plugins_path_list}")
     
     def discover_plugins(self) -> List[PluginMetadata]:
         """
@@ -103,15 +105,18 @@ class PluginLoader:
         """
         discovered = []
         
-        if self.plugins_path.exists():
-            for plugin_dir in self.plugins_path.iterdir():
+        for plugins_path in self.plugins_path_list:
+            if not plugins_path.exists():
+                logger.warning(f"Plugins directory not found: {plugins_path}")
+                continue
+            
+            for plugin_dir in plugins_path.iterdir():
                 if plugin_dir.is_dir():
                     metadata = self._load_plugin_metadata(plugin_dir)
                     if metadata:
                         discovered.append(metadata)
                         self.plugins[metadata.id] = metadata
-        else:
-            logger.warning(f"Plugins directory not found: {self.plugins_path}")
+            
         
         logger.info(f"Discovered {len(discovered)} plugins: {[p.id for p in discovered]}")
         return discovered
@@ -438,10 +443,10 @@ class PluginLoader:
 _plugin_loader: Optional[PluginLoader] = None
 
 
-def init_plugin_loader(base_dir: Path, user_data_dir: Optional[Path] = None) -> PluginLoader:
+def init_plugin_loader(plugins_dir: Path) -> PluginLoader:
     """Initialize the global plugin loader"""
     global _plugin_loader
-    _plugin_loader = PluginLoader(base_dir, user_data_dir)
+    _plugin_loader = PluginLoader(plugins_dir)
     return _plugin_loader
 
 
@@ -449,4 +454,13 @@ def get_plugin_loader() -> Optional[PluginLoader]:
     """Get the global plugin loader instance"""
     return _plugin_loader
 
+def init_all_plugins(app: "FastAPI"):
+    try:
+        # 1. Try Bundled path (preferred for bundled onefile/onedir)
+        plugin_loader = init_plugin_loader(settings.plugins_root)
+        plugin_loader.discover_plugins()
 
+        registered_count = plugin_loader.register_all_routers(app)
+        logger.info(f"Plugin system initialized: {registered_count} plugins loaded")
+    except Exception as e:
+        logger.error(f"Failed to initialize plugin system: {e}")

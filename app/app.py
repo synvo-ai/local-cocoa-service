@@ -12,17 +12,15 @@ from services.search import router as search
 from services.memory import router as memory
 from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, spawns as spawns_router
 
-from core.context import get_indexer, get_storage
+from core.context import get_indexer
 from core.config import settings
-from core.models import FolderRecord
 from core.auth import verify_api_key, ensure_local_key
 
 # Plugin system
-from plugins import init_plugin_loader
+from plugins import init_all_plugins
 
 import asyncio
 import logging
-import hashlib
 import datetime as dt
 
 # Force ProactorEventLoop on Windows to avoid "too many file descriptors" error
@@ -34,7 +32,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Local RAG Agent", version="1.0.0", dependencies=[Depends(verify_api_key)])
+app = FastAPI(title="Local Cocoa Service", version="1.0.0", dependencies=[Depends(verify_api_key)])
 
 # Allow CORS for local development
 app.add_middleware(
@@ -59,25 +57,6 @@ app.include_router(plugins_router.router)
 app.include_router(language_router.router)
 app.include_router(events_router.router)
 app.include_router(spawns_router.router)
-
-# Initialize plugin system and load plugins at startup
-# This ensures plugin routes are available before the first request
-# Note: _resource_root is the project root (where plugins/ directory is located)
-if getattr(sys, 'frozen', False):
-    # In packaged Windows app: <resources>/local-cocoa-server/local-cocoa-server.exe
-    # We want <resources> as the project root so <resources>/plugins/ is found
-    _resource_root = Path(sys.executable).parent.parent.parent
-else:
-    _resource_root = Path(__file__).parent.parent  # app/app.py -> project root
-try:
-    plugin_loader = init_plugin_loader(_resource_root)
-    plugin_loader.discover_plugins()
-    registered_count = plugin_loader.register_all_routers(app)
-    logger.info(f"Plugin system initialized: {registered_count} plugins loaded")
-except Exception as e:
-    logger.error(f"Failed to initialize plugin system: {e}")
-    import traceback
-    traceback.print_exc()
 
 _poll_task: asyncio.Task | None = None
 _startup_refresh_task: asyncio.Task | None = None
@@ -153,6 +132,8 @@ async def _staged_scheduler_loop(max_wait: int = 60) -> None:
 @app.on_event("startup")
 async def on_startup() -> None:
     global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
+    # Initialize plugin system and load plugins at startup. Ensures plugin routes are available before the first request
+    init_all_plugins(app)
 
     # Ensure local-key exists and is written to file for frontend
     ensure_local_key(settings.runtime_root)

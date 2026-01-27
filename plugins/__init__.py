@@ -7,7 +7,7 @@ from .loader import (
     PluginLoader,
     PluginMetadata,
     get_plugin_loader,
-    init_plugin_loader,
+    init_all_plugins,
 )
 from .registry import (
     PluginRegistry,
@@ -18,7 +18,7 @@ __all__ = [
     "PluginLoader",
     "PluginMetadata",
     "get_plugin_loader",
-    "init_plugin_loader",
+    "init_all_plugins",
     "PluginRegistry",
     "get_plugin_registry",
 ]

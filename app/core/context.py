@@ -7,19 +7,6 @@ from typing import Optional
 from services.llm.client import EmbeddingClient, LlmClient, RerankClient, TranscriptionClient
 from .config import settings
 
-# Add plugins directory to path for importing plugin services
-# We import directly from service modules to avoid circular imports with routers
-if getattr(sys, 'frozen', False):
-    # Running in a PyInstaller bundle inside Electron resources/local_rag_dist/local_rag_server/
-    # The standard plugins directory is at resources/plugins
-    # Path(sys.executable) is .../resources/local_rag_dist/local_rag_server/local_rag_server.exe
-    _plugins_path = Path(sys.executable).parent.parent.parent / "plugins"
-else:
-    _plugins_path = (Path(__file__).resolve().parent.parent.parent / "plugins")
-
-if str(_plugins_path) not in sys.path:
-    sys.path.insert(0, str(_plugins_path))
-
 # Import plugin services - import from service module directly, NOT from __init__
 # These are loaded lazily in get_xxx_service functions to avoid circular imports
 # and to ensure the plugins directory is in sys.path first.

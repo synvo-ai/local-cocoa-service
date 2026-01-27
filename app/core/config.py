@@ -13,38 +13,63 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import sys
 
-# Determine project root for finding bundled files (PyInstaller compatible)
-def _get_project_root() -> Path:
+# Determine resource roots for finding bundled files vs external config (PyInstaller compatible)
+def _get_resource_root() -> Path:
+    """Returns the directory containing the executable or the script."""
     if getattr(sys, 'frozen', False):
-        # Running in a PyInstaller bundle
-        return Path(sys._MEIPASS)
+        # Running from a PyInstaller bundle. use the executable's parent directory
+        return Path(sys.executable).parent
     # Running from source (3 levels up from app/core/config.py)
     return Path(__file__).resolve().parent.parent.parent
 
-_project_root = _get_project_root()
+def _get_bundle_root() -> Path:
+    """Returns the internal bundle root (e.g., _MEIPASS in onefile mode or the same as resource_root in onedir/source)."""
+    if getattr(sys, 'frozen', False):
+        # sys._MEIPASS is the temporary directory where PyInstaller unzips files
+        return Path(sys._MEIPASS)
+    # Running from source
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _get_plugins_root() -> Path:
+    # Add plugins directory to path for importing plugin services
+    # We import directly from service modules to avoid circular imports with routers
+    if getattr(sys, 'frozen', False):
+        # 1. Try Bundled path (preferred for bundled onefile/onedir)
+        root_dir = _bundle_root / "plugins"
+        
+        if not root_dir.is_dir():
+            # 2. Try path next to executable (for external plugins in onedir)
+            root_dir = _resource_root / "plugins"
+            
+        if not root_dir.is_dir():
+            # Path(sys.executable) is dist/local-cocoa-server/local-cocoa-server.exe
+            root_dir = Path(sys.executable).parent.parent.parent / "plugins"
+    else:
+        root_dir = _resource_root / "plugins"
+
+    if root_dir.is_dir() and str(root_dir) not in sys.path:
+        sys.path.insert(0, str(root_dir))
+
+    return root_dir
+
+_resource_root = _get_resource_root()
+_bundle_root = _get_bundle_root()
+_plugins_root = _get_plugins_root()
+
+print(f"[config] Resource root (external): {str(_resource_root)}")
+print(f"[config] Bundle root (internal): {str(_bundle_root)}")
 
 # Determine environment mode (e.g., 'dev', 'prod', 'test')
 # Default to 'dev' if ENV system environment variable is not set
 _env_mode = os.getenv("ENV", "dev")
 
 # Construct list of .env files to load
-# We use absolute paths to ensure they are found regardless of the current working directory
+# We load bundled ones first, then allow external ones to override them
 _env_files = [
-    str(_project_root / ".env"),
-    str(_project_root / f".env.{_env_mode}")
+    str(_bundle_root / ".env"),
+    str(_bundle_root / f".env.{_env_mode}"),
 ]
-
-# Also check for .env files in the current working directory to allow runtime overrides
-# (only if CWD is different from the bundle/project root)
-try:
-    _cwd = Path.cwd()
-    if _cwd.resolve() != _project_root.resolve():
-        if (_cwd / ".env").exists():
-            _env_files.append(str(_cwd / ".env"))
-        if (_cwd / f".env.{_env_mode}").exists():
-            _env_files.append(str(_cwd / f".env.{_env_mode}"))
-except Exception:
-    pass
 
 # Shared configuration for all settings classes to ensure consistent loading priority:
 # 1. Existing system environment variables (highest priority)
@@ -64,16 +89,16 @@ class ServiceEndpoints(BaseSettings):
     """Service endpoints configuration."""
     model_config = _common_config
     
-    llm_host: str = Field(alias="LOCAL_LLM_HOST")
-    llm_port: int = Field(alias="LOCAL_LLM_PORT")
-    embedding_host: str = Field(alias="LOCAL_EMBEDDING_HOST")
-    embedding_port: int = Field(alias="LOCAL_EMBEDDING_PORT")
-    rerank_host: str = Field(alias="LOCAL_RERANK_HOST")
-    rerank_port: int = Field(alias="LOCAL_RERANK_PORT")
-    vision_host: str = Field(alias="LOCAL_VISION_HOST")
-    vision_port: int = Field(alias="LOCAL_VISION_PORT")
-    transcribe_host: str = Field(alias="LOCAL_TRANSCRIBE_HOST")
-    transcribe_port: int = Field(alias="LOCAL_TRANSCRIBE_PORT")
+    llm_host: str = Field(alias="LOCAL_SERVICE_LLM_HOST")
+    llm_port: int = Field(alias="LOCAL_SERVICE_LLM_PORT")
+    embedding_host: str = Field(alias="LOCAL_SERVICE_EMBEDDING_HOST")
+    embedding_port: int = Field(alias="LOCAL_SERVICE_EMBEDDING_PORT")
+    rerank_host: str = Field(alias="LOCAL_SERVICE_RERANK_HOST")
+    rerank_port: int = Field(alias="LOCAL_SERVICE_RERANK_PORT")
+    vision_host: str = Field(alias="LOCAL_SERVICE_VISION_HOST")
+    vision_port: int = Field(alias="LOCAL_SERVICE_VISION_PORT")
+    transcribe_host: str = Field(alias="LOCAL_SERVICE_TRANSCRIBE_HOST")
+    transcribe_port: int = Field(alias="LOCAL_SERVICE_TRANSCRIBE_PORT")
 
     @property
     def llm_url(self) -> str: return f"http://{self.llm_host}:{self.llm_port}"
@@ -105,12 +130,18 @@ class Settings(BaseSettings):
 
     # Path settings
     runtime_root: Path = Field(alias="LOCAL_RUNTIME_ROOT")
+    resource_root: Path = _resource_root
+    bundle_root: Path = _bundle_root
+    plugins_root: Path = _plugins_root
     models_config_path: Path = Field(alias="LOCAL_MODELS_CONFIG_PATH")
+    service_bin_path: Path = Field(alias="LOCAL_SERVICE_BIN_PATH")
     llama_server_path: Path = Field(alias="LOCAL_LLAMA_SERVER_PATH")
     whisper_server_path: Path = Field(alias="LOCAL_WHISPER_SERVER_PATH")
     model_root_path: Path = Field(alias="LOCAL_MODEL_ROOT_PATH")
 
     endpoints: ServiceEndpoints = Field(default_factory=ServiceEndpoints)
+    main_host: str = Field(alias="LOCAL_SERVICE_MAIN_HOST")
+    main_port: int = Field(alias="LOCAL_SERVICE_MAIN_PORT")
     poll_interval_seconds: int = Field(alias="LOCAL_RAG_POLL_INTERVAL_SECONDS")
     refresh_on_startup: bool = Field(alias="LOCAL_RAG_REFRESH_ON_STARTUP")
     db_name: str = Field(alias="LOCAL_RAG_DB_NAME")
@@ -170,6 +201,10 @@ class Settings(BaseSettings):
     memory_extraction_stage: Literal["fast", "deep", "none"] = Field(alias="LOCAL_MEMORY_EXTRACTION_STAGE")
     memory_chunk_size: int = Field(alias="LOCAL_MEMORY_CHUNK_SIZE")
     
+    # Debug settings
+    debug_port: Optional[int] = Field(default=None, alias="LOCAL_SERVICE_DEBUG_PORT")
+    debug_wait: bool = Field(default=False, alias="LOCAL_SERVICE_DEBUG_WAIT")
+
     # Model IDs
     active_model_id: str = Field(alias="LOCAL_ACTIVE_MODEL_ID")
     active_embedding_model_id: str = Field(alias="LOCAL_ACTIVE_EMBEDDING_MODEL_ID")
@@ -207,10 +242,14 @@ class Settings(BaseSettings):
         must use this post validator to re-calculate derived values when parent values is ready
         """
         runtime_root_str = str(self.runtime_root)
+        service_bin_path_str = str(self.service_bin_path)
+        main_host_str = str(self.main_host)
         
         # Define replacement map
         replacements = {
             "<LOCAL_RUNTIME_ROOT>": runtime_root_str,
+            "<LOCAL_SERVICE_BIN_PATH>": service_bin_path_str,
+            "<LOCAL_SERVICE_MAIN_HOST>": main_host_str,
             # Add other base variables here if needed
         }
 
@@ -225,6 +264,12 @@ class Settings(BaseSettings):
         self.llama_server_path = Path(_resolve_str(str(self.llama_server_path)))
         self.whisper_server_path = Path(_resolve_str(str(self.whisper_server_path)))
         self.model_root_path = Path(_resolve_str(str(self.model_root_path)))
+
+        self.endpoints.llm_host = _resolve_str(self.endpoints.llm_host)
+        self.endpoints.embedding_host = _resolve_str(self.endpoints.embedding_host)
+        self.endpoints.rerank_host = _resolve_str(self.endpoints.rerank_host)
+        self.endpoints.vision_host = _resolve_str(self.endpoints.vision_host)
+        self.endpoints.transcribe_host = _resolve_str(self.endpoints.transcribe_host)
 
         # 2. Resolve nested configs
         self.qdrant.data_path = _resolve_str(self.qdrant.data_path)

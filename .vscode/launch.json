@@ -2,14 +2,24 @@
     "version": "0.3.0",
     "configurations": [
         {
-            "name": "Debugger: Current File",
+            "name": "Attach",
+            "type": "debugpy",
+            "request": "attach",
+            "connect": {
+                "host": "127.0.0.1",
+                "port": 5678
+            },
+            "justMyCode": false,
+        },
+        {
+            "name": "Current File",
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
             "console": "integratedTerminal"
         },
         {
-            "name": "Debugger: Main",
+            "name": "Main",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/main.py",
@@ -21,7 +31,7 @@
             "justMyCode": false
         },
         {
-            "name": "Debugger: Build",
+            "name": "Build",
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/scripts/build.py",
@@ -36,8 +46,7 @@
                     "dev",
                     "--output_dir",
                     "${workspaceFolder}/dist",
-                    "--no-cache",
-                    "true",
+                    // "--no-cache",    // for dev build, use cache to reuse previous build results
                 ]
             },
             "osx": { // macOS-specific properties

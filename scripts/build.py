@@ -32,14 +32,19 @@ def get_build_config(mode: BuildMode) -> Dict:
             "uvicorn", "fastapi", "pydantic", "starlette", "qdrant_client",
             "tiktoken", "rapidocr_onnxruntime", "onnxruntime", "langdetect",
             "certifi", "services", "magika", "markitdown", "grpcio",
-            "azure", "msal", "msgraph"
+            "azure", "msal", "msgraph", "debugpy", "mcp",
+            "docx", "pptx", "openpyxl", "xlrd", "pypdf", "pdfminer", "mammoth", "lxml",
+            "bs4", "pymongo", "sounddevice", "pydub", "speech_recognition",
+            "rich", "typer", "fitz", "PIL", "cv2", "numpy"
         ],
         "hidden_imports": [
             "uvicorn.logging", "uvicorn.loops.auto", "uvicorn.protocols.http.auto",
             "uvicorn.protocols.websockets.auto", "uvicorn.lifespan.on",
             "email_validator", "multipart", "PIL", "cv2", "numpy",
             "fitz", "xxhash", "markdownify", "markdown_it", "msal",
-            "msal_extensions", "azure.identity", "msgraph", "onnx", "email"
+            "msal_extensions", "azure.identity", "msgraph", "onnx", "email",
+            "docx", "pptx", "openpyxl", "xlrd", "pypdf", "pdfminer", "mammoth",
+            "imaplib", "poplib", "smtplib", "ssl"
         ],
         "exclude_modules": [
             "tkinter", "matplotlib", "scipy", "pandas", "torch", "tensorflow"
@@ -60,8 +65,8 @@ def get_build_config(mode: BuildMode) -> Dict:
             "clean_build": False,  # Keep build artifacts for faster rebuilds
             "include_debug_symbols": True,
             "optimize_level": 0,
-            "exclude_modules": base_config["exclude_modules"] + ["pyinstaller"],
-            "extra_pyinstaller_args": ["--noupx"]  # disable compression under dev mode for faster build performance
+            "exclude_modules": base_config["exclude_modules"] + ["pyinstaller", "app", "plugins"],
+            "extra_pyinstaller_args": ["--noupx", "--exclude-module", "app", "--exclude-module", "plugins"]  # disable compression under dev mode for faster build performance
         }
 
     # Prod mode overrides
@@ -71,6 +76,7 @@ def get_build_config(mode: BuildMode) -> Dict:
             "clean_build": True,
             "include_debug_symbols": False,
             "optimize_level": 2,
+            "exclude_modules": base_config["exclude_modules"] + ["debugpy"],
             "extra_pyinstaller_args": [
                 "--optimize=2",
                 "--strip",  # Remove symbols (Linux/macOS only)
@@ -580,9 +586,9 @@ def write_readme(dist_dir: Path, python_version: str, mode: BuildMode, target_pl
     }
 
     platform_notes = {
-        "win": "## Windows Notes\n- Executable is a .exe file\n- Requires no additional dependencies (PyInstaller onefile)\n- Run with run_{mode}.bat",
-        "linux": "## Linux Notes\n- Executable is stripped of debug symbols\n- Run with run_{mode}.sh\n- May require libstdc++ and other system libraries",
-        "mac": "## Mac Notes\n- Executable is signed with ad-hoc signature\n- Run with run_{mode}.sh\n- May require Gatekeeper exceptions for unsigned binaries"
+        "win": "## Windows Notes\n- Executable is a .exe file\n- Requires no additional dependencies (PyInstaller onefile)",
+        "linux": "## Linux Notes\n- Executable is stripped of debug symbols\n- May require libstdc++ and other system libraries",
+        "mac": "## Mac Notes\n- Executable is signed with ad-hoc signature\n- May require Gatekeeper exceptions for unsigned binaries"
     }
     
     with open(readme_path, "w", encoding="utf-8") as f:
@@ -595,11 +601,13 @@ It contains a {mode} mode PyInstaller bundle built for {target_platform}.
 - {'Windows: `run_{mode}.bat`' if target_platform == 'win' else f'{target_platform.capitalize()}: `./run_{mode}.sh`'}
 
 ## Environment Variables
-- LOCAL_RAG_HOST: Host to bind to (default: 127.0.0.1)
-- LOCAL_RAG_PORT: Port to listen on (default: 8890)
-- LOCAL_RAG_HOME: Data directory for RAG storage
-- LOCAL_LLM_URL, LOCAL_EMBEDDING_URL, LOCAL_RERANK_URL: Service URLs
-- LOCAL_RAG_DEBUG: Enable debug logging (dev mode only)
+- LOCAL_SERVICE_BIN_PATH: Root path of all the binary exeution files (local-cocoa-server、llama、whisper)
+- LOCAL_SERVICE_LOG_TO_FILE: Whether to log to file (default: True)
+- LOCAL_SERVICE_MAIN_HOST: Host to bind to (default: 127.0.0.1)
+- LOCAL_SERVICE_MAIN_PORT: Port to listen on (default: 8890)
+- LOCAL_RUNTIME_ROOT: Data directory for RAG storage
+- LOCAL_SERVICE_DEBUG_PORT: Port to listen on for debug (default: 8891). Only effective in dev mode.
+- LOCAL_SERVICE_DEBUG_WAIT: Whether to wait for debugger to attach (default: False). Only effective in dev mode.
 
 ## Binary Contents
 The `llama-cpp/bin` folder contains the llama.cpp server binaries (if available).
@@ -647,7 +655,15 @@ def zip_directory(source_dir: Path, zip_path: Path):
 # --------------------------
 # Main Build Function
 # --------------------------
-def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, output_dir: Path, no_cache: bool = False):
+def main(
+    root_dir: Path, 
+    mode: BuildMode, 
+    target_platform: SupportedPlatforms, 
+    output_dir: Path, 
+    no_cache: bool = False, 
+    no_packing: bool = False,
+    incremental: bool = False
+):
     """
     Main packaging function with mode and platform support
     
@@ -657,6 +673,8 @@ def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, o
         target_platform: Target build platform (win/linux/mac)
         output_dir: Custom output directory for distribution
         no_cache: Whether to force recreate venv and reinstall dependencies
+        no_packing: Whether to skip ZIP packing
+        incremental: Whether to perform a fast incremental update (source only)
     
     Raises:
         RuntimeError: If any step fails
@@ -665,11 +683,53 @@ def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, o
 
     # Directory setup with custom output dir
     dist_dir = output_dir.resolve()
+    # In onedir mode, PyInstaller puts everything in a subdirectory
+    app_dist_dir = dist_dir / "local-cocoa-server"
+    if mode == "prod":
+        # In onefile mode, it's just the executable in dist_dir, but we still handle it
+        app_dist_dir = dist_dir
+
     build_dir = root_dir / "build" / target_platform
     requirements_path = root_dir / "app" / "requirements.txt"
     main_py_path = root_dir / "main.py"
-    llama_cpp_src = root_dir / "runtime" / "llama-cpp"
-    whisper_cpp_src = root_dir / "runtime" / "whisper-cpp"
+    llama_cpp_src = root_dir / "dist" / "llama-cpp"
+    whisper_cpp_src = root_dir / "dist" / "whisper-cpp"
+
+    # Fast Path: Incremental Update
+    if incremental and mode == "dev":
+        exe_ext = ".exe" if target_platform == "win" else ""
+        exe_path = app_dist_dir / f"local-cocoa-server{exe_ext}"
+        
+        if exe_path.exists():
+            print(f">>> Performing fast incremental update for {mode} mode...")
+            
+            # Step 1: Copy source files (mode-specific exclusions)
+            # Directly to the distribution directory to overwrite existing files
+            print(f"Updating source code in {app_dist_dir}...")
+            copy_source_files(root_dir / "app", app_dist_dir / "app", config["exclude_patterns"], mode)
+            copy_source_files(root_dir / "plugins", app_dist_dir / "plugins", config["exclude_patterns"], mode)
+            
+            # Update main.py (if it exists as a file next to exe, though usually it's bundled)
+            # If it's bundled, updating the external one won't help unless main.py is excluded too.
+            # But the exclusion logic in get_build_config handles 'app' and 'plugins'.
+            shutil.copy2(main_py_path, build_dir / "main.py")
+            
+            # Step 2: Copy .env and config files
+            for data_file in [".env", f".env.{mode}", "models.config.json"]:
+                src_file = root_dir / data_file
+                if src_file.is_file():
+                    shutil.copy2(src_file, app_dist_dir / data_file)
+            
+            print("✓ Incremental update complete.")
+            
+            # Optional packing
+            if not no_packing:
+                zip_filename = f"local-cocoa-server-{target_platform}-{mode}.zip"
+                zip_path = output_dir.resolve() / zip_filename
+                zip_directory(dist_dir, zip_path)
+            return
+
+    # Regular Build Path...
 
     # Step 1: Find Python interpreter (with platform awareness)
     python_path = find_python_interpreter(target_platform=target_platform)
@@ -682,8 +742,20 @@ def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, o
     # Step 2: Clean up previous builds (mode-specific)
     if config["clean_build"]:
         print(f"Cleaning up previous {mode} build artifacts for {target_platform}")
-        shutil.rmtree(dist_dir, ignore_errors=True)
-        shutil.rmtree(build_dir / f"work", ignore_errors=True)
+        # When cleaning dist_dir, we preserve llama-cpp and whisper-cpp if they exist
+        if dist_dir.exists():
+            for item in dist_dir.iterdir():
+                # Avoid deleting manually placed binary directories
+                if item.is_dir() and item.name in ["llama-cpp", "whisper-cpp"]:
+                    print(f"Preserving {item.name} in distribution directory")
+                    continue
+                
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+        
+        shutil.rmtree(build_dir / "work", ignore_errors=True)
     
     dist_dir.mkdir(parents=True, exist_ok=True)
     build_dir.mkdir(parents=True, exist_ok=True)
@@ -723,31 +795,38 @@ def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, o
         target_platform=target_platform
     )
 
+    # Step 6.1: For dev mode, we excluded app and plugins from PyInstaller analysis
+    # so we must manually copy them to the dist directory
+    if mode == "dev":
+        print(f"Manually copying excluded source folders to {app_dist_dir}")
+        copy_source_files(root_dir / "app", app_dist_dir / "app", config["exclude_patterns"], mode)
+        copy_source_files(root_dir / "plugins", app_dist_dir / "plugins", config["exclude_patterns"], mode)
+
     # Step 7: Handle llama-cpp binaries (platform-specific)
-    if llama_cpp_src.is_dir():
-        print(f"Copying llama-cpp binaries from {llama_cpp_src} (mode: {mode}, target: {target_platform})")
-        llama_cpp_dest = dist_dir / "llama-cpp"
-        shutil.copytree(llama_cpp_src, llama_cpp_dest, dirs_exist_ok=True)
+    llama_cpp_dest = dist_dir / "llama-cpp"
+    if llama_cpp_src.exists() and llama_cpp_src.resolve() == llama_cpp_dest.resolve():
+        # If destination already exists (likely preserved during cleanup), skip copy if it's the same path
+        print(f"✓ Using existing llama-cpp binaries in {dist_dir} (matching source)")
         
         # Fix rpaths (Linux/mac only)
         if target_platform in ["linux", "mac"]:
             llama_server = llama_cpp_dest / ("llama-server.exe" if target_platform == "win" else "llama-server")
             fix_llama_cpp_rpaths(llama_server)
     else:
-        print(f"Warning: llama-cpp/bin not found at {llama_cpp_src}; skipping binary bundle (mode: {mode})", file=sys.stderr)
+        print(f"Warning: llama-cpp not found at {llama_cpp_src}; skipping (mode: {mode})", file=sys.stderr)
 
     # Step 8: Handle whisper-cpp binaries (platform-specific)
-    if whisper_cpp_src.is_dir():
-        print(f"Copying whisper-cpp binaries from {whisper_cpp_src} (mode: {mode}, target: {target_platform})")
-        whisper_cpp_dest = dist_dir / "whisper-cpp"
-        shutil.copytree(whisper_cpp_src, whisper_cpp_dest, dirs_exist_ok=True)
+    whisper_cpp_dest = dist_dir / "whisper-cpp"
+    if whisper_cpp_src.exists() and whisper_cpp_src.resolve() == whisper_cpp_dest.resolve():
+        # If destination already exists (likely preserved during cleanup), skip copy if it's the same path
+        print(f"✓ Using existing whisper-cpp binaries in {dist_dir} (matching source)")
         
         # Fix rpaths (Linux/mac only)
         if target_platform in ["linux", "mac"]:
             whisper_server = whisper_cpp_dest / ("whisper-server.exe" if target_platform == "win" else "whisper-server")
             fix_llama_cpp_rpaths(whisper_server)
     else:
-        print(f"Warning: whisper-cpp/bin not found at {whisper_cpp_src}; skipping binary bundle (mode: {mode})", file=sys.stderr)
+        print(f"Warning: whisper-cpp not found at {whisper_cpp_src}; skipping (mode: {mode})", file=sys.stderr)
 
     # Step 9: Write README (platform + mode specific)
     write_readme(dist_dir, python_version, mode, target_platform)
@@ -760,7 +839,12 @@ def main(root_dir: Path, mode: BuildMode, target_platform: SupportedPlatforms, o
             shutil.rmtree(build_dir / f"venv", ignore_errors=True)
 
     # Step 11: Compress the distribution directory to a ZIP file
-    zip_filename = f"local-cocoa-service-{target_platform}-{mode}.zip"
+    if no_packing:
+        print(f"\n✓ Successfully built services in {dist_dir} (mode: {mode}, target: {target_platform})")
+        print("   Skipping ZIP packing as requested.")
+        return
+
+    zip_filename = f"local-cocoa-server-{target_platform}-{mode}.zip"
     zip_path = output_dir.resolve() / zip_filename
     zip_directory(dist_dir, zip_path)
 
@@ -817,6 +901,16 @@ def parse_arguments():
         action="store_true",  # Existence of the argument sets it to True, default to False
         help="Force recreate virtual environment and reinstall dependencies (default: False)"
     )
+    parser.add_argument(
+        "--no-packing",
+        action="store_true",
+        help="Skip ZIP packing operation (default: False)"
+    )
+    parser.add_argument(
+        "--incremental",
+        action="store_true",
+        help="If a previous build exists, only update source code. Faster for development. (default: False)"
+    )
     
     return parser.parse_args()
 
@@ -831,9 +925,11 @@ if __name__ == "__main__":
         build_mode: BuildMode = args.mode  # type: ignore
         target_platform: SupportedPlatforms = args.platform  # type: ignore
         no_cache: bool = args.no_cache
+        no_packing: bool = args.no_packing
+        incremental: bool = args.incremental
         
         # Run main build function
-        main(root_dir, build_mode, target_platform, output_dir, no_cache)
+        main(root_dir, build_mode, target_platform, output_dir, no_cache, no_packing, incremental)
         sys.exit(0)
     except RuntimeError as e:
         print(f"Error: {e}", file=sys.stderr)
