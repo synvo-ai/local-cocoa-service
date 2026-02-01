@@ -6,8 +6,9 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, List, Optional, Tuple
 
 from PIL import Image
 import numpy as np
@@ -27,6 +28,17 @@ from core.config import settings
 from core.i18n import get_prompt, DEFAULT_LANGUAGE, SupportedLanguage
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class OcrTextBlock:
+    """
+    Represents a text block extracted by OCR with spatial information.
+    Coordinates are normalized (0-1) relative to image dimensions.
+    """
+    text: str
+    bbox: Tuple[float, float, float, float]  # (x0, y0, x1, y1) normalized 0-1
+    confidence: float  # OCR confidence score (0-1)
 
 
 def render_pdf_images(path: Path) -> dict[str, bytes]:
@@ -171,6 +183,75 @@ class VisionProcessor:
 
         return await asyncio.to_thread(_run)
 
+    async def ocr_image_with_boxes(self, image_bytes: bytes) -> Tuple[str, List[OcrTextBlock]]:
+        """
+        Run RapidOCR on image bytes and return text with bounding boxes.
+
+        Returns:
+            Tuple of (full_text, list of OcrTextBlock with spatial info)
+        """
+        if not self._ocr_engine:
+            logger.warning("RapidOCR engine not initialized.")
+            return "", []
+
+        def _run():
+            try:
+                with Image.open(io.BytesIO(image_bytes)) as img:
+                    # Get image dimensions for normalization
+                    img_width, img_height = img.size
+
+                    # Convert to RGB if needed
+                    if img.mode != "RGB":
+                        img = img.convert("RGB")
+                    # Convert to numpy array for RapidOCR
+                    img_np = np.array(img)
+
+                # Run OCR
+                # RapidOCR returns a tuple (result, elapse)
+                # result is a list of [box, text, score]
+                # box is [[x0,y0], [x1,y0], [x1,y1], [x0,y1]] (4 corners)
+                result, _ = self._ocr_engine(img_np)
+
+                if not result:
+                    return "", []
+
+                text_blocks: List[OcrTextBlock] = []
+                texts: List[str] = []
+
+                for item in result:
+                    box, text, score = item[0], item[1], item[2]
+
+                    # Extract bounding box from 4-point polygon
+                    # box is [[x0,y0], [x1,y0], [x1,y1], [x0,y1]]
+                    if isinstance(box, (list, tuple)) and len(box) >= 4:
+                        x_coords = [pt[0] for pt in box]
+                        y_coords = [pt[1] for pt in box]
+                        x0, x1 = min(x_coords), max(x_coords)
+                        y0, y1 = min(y_coords), max(y_coords)
+
+                        # Normalize to 0-1 range
+                        norm_x0 = x0 / img_width if img_width > 0 else 0
+                        norm_y0 = y0 / img_height if img_height > 0 else 0
+                        norm_x1 = x1 / img_width if img_width > 0 else 1
+                        norm_y1 = y1 / img_height if img_height > 0 else 1
+
+                        text_blocks.append(OcrTextBlock(
+                            text=text,
+                            bbox=(norm_x0, norm_y0, norm_x1, norm_y1),
+                            confidence=float(score) if score else 0.0,
+                        ))
+
+                    texts.append(text)
+
+                full_text = "\n".join(texts)
+                return full_text, text_blocks
+
+            except Exception as e:
+                logger.warning(f"OCR with boxes failed: {e}")
+                return "", []
+
+        return await asyncio.to_thread(_run)
+
     async def _describe_image(self, image_bytes: bytes, prompt: str, max_tokens: int | None = None) -> str:
         """Run VLM description on image bytes.
 
@@ -179,7 +260,7 @@ class VisionProcessor:
             prompt: Prompt for the VLM.
             max_tokens: Maximum output tokens. If None, uses settings.pdf_page_max_tokens.
         """
-        if not settings.endpoints.vision_url:
+        if not settings.endpoints.vision:
             logger.warning("Vision endpoint not configured.")
             self.last_error = "Vision endpoint not configured"
             return ""

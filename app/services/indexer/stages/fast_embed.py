@@ -149,6 +149,14 @@ class FastEmbedProcessor:
                     if "page_number" in chunk.metadata:
                         doc_metadata["page"] = chunk.metadata["page_number"]
 
+                # Add spatial metadata for chunk area visualization (backward compatible)
+                if chunk.page_num is not None:
+                    doc_metadata["page_num"] = chunk.page_num
+                if chunk.bbox is not None:
+                    doc_metadata["bbox"] = chunk.bbox
+                if chunk.source_regions:
+                    doc_metadata["source_regions"] = [r.model_dump() for r in chunk.source_regions]
+
                 documents.append(VectorDocument(
                     doc_id=chunk.chunk_id,
                     vector=vector,
@@ -324,6 +332,14 @@ class FastEmbedProcessor:
                         # Privacy level for filtering - external requests cannot see private files
                         "privacy_level": file_record.privacy_level,
                     }
+                    # Add spatial metadata for chunk area visualization (backward compatible)
+                    if chunk.page_num is not None:
+                        doc_metadata["page_num"] = chunk.page_num
+                    if chunk.bbox is not None:
+                        doc_metadata["bbox"] = chunk.bbox
+                    if chunk.source_regions:
+                        doc_metadata["source_regions"] = [r.model_dump() for r in chunk.source_regions]
+
                     documents.append(VectorDocument(
                         doc_id=chunk.chunk_id,
                         vector=vector,

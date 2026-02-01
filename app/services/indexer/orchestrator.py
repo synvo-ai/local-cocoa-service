@@ -76,6 +76,7 @@ class Indexer:
             state_manager=self.state,
             content=content,
             chunker=chunker,
+            llm_client=llm_client,
             enable_memory_extraction=settings.enable_memory_extraction,
             memory_user_id=settings.memory_user_id,
         )
@@ -137,6 +138,11 @@ class Indexer:
         # Only run if not already running
         if self.status().status == "running":
             logger.debug("Indexer already running, skipping auto-trigger")
+            return False
+        
+        # Also check if lock is held (legacy refresh() might be running)
+        if self.state.lock.locked():
+            logger.debug("Indexer lock held (legacy task running), skipping auto-trigger")
             return False
             
         logger.info("Auto-triggering staged indexer for pending files")

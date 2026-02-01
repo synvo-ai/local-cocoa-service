@@ -268,6 +268,8 @@ class TwoRoundScheduler:
         # ═══════════════════════════════════════════════════════════════
         # Priority 2: Fast Embedding (all files with fast_stage=1)
         # ═══════════════════════════════════════════════════════════════
+        # NOTE: LLM summary generation moved to Priority 2.5 (after embedding)
+        # This allows fast index to complete quickly so users can start searching
         if not self.paused["fast_embed"]:
             # First check if there are still files pending fast_text
             pending_text = self.storage.list_files_by_stage(
@@ -275,6 +277,7 @@ class TwoRoundScheduler:
             )
             
             # Only proceed to embedding if no files pending fast_text
+            # Summary generation no longer blocks embedding
             if not pending_text:
                 ready = self.storage.list_files_by_stage(
                     fast_stage=1,
@@ -298,21 +301,49 @@ class TwoRoundScheduler:
                     return True  # Work was done
 
         # ═══════════════════════════════════════════════════════════════
-        # Priority 3: Deep Processing (one file at a time)
+        # Priority 2.5: Batch Summary Generation (after embedding complete)
+        # This runs AFTER fast index so users can search immediately
         # ═══════════════════════════════════════════════════════════════
-        if not self.paused["deep"]:
-            # Check if fast round is complete (use folder_id in query for efficiency)
-            pending_fast = self.storage.list_files_by_stage(
+        if not self.paused["fast_text"]:
+            # Check if fast text and embedding are complete
+            pending_text = self.storage.list_files_by_stage(
                 fast_stage=0, limit=1, folder_id=folder_id
             )
             pending_embed = self.storage.list_files_by_stage(
                 fast_stage=1, limit=1, folder_id=folder_id
             )
+            
+            # Only generate summaries after fast index is fully complete
+            if not pending_text and not pending_embed:
+                # Check if there are files needing summary
+                files_needing_summary = self.storage.list_files_needing_summary(
+                    folder_id=folder_id, limit=1
+                )
+                
+                if files_needing_summary:
+                    logger.info("Fast index complete, generating batch summaries")
+                    summary_count = await self.fast_text.generate_summaries_batch(
+                        folder_id=folder_id,
+                        batch_size=50,
+                    )
+                    if summary_count > 0:
+                        return True  # Work was done, check priority again
 
-            # Only proceed to deep if fast round is complete
-            if not pending_fast and not pending_embed:
+        # ═══════════════════════════════════════════════════════════════
+        # Priority 3: Deep Processing (one file at a time)
+        # Deep only needs Fast Text complete, not Fast Embed (Semantic)
+        # ═══════════════════════════════════════════════════════════════
+        if not self.paused["deep"]:
+            # Check if there are files pending Fast Text (must complete first)
+            pending_fast = self.storage.list_files_by_stage(
+                fast_stage=0, limit=1, folder_id=folder_id
+            )
+
+            # Only proceed to deep if Fast Text is complete for all files
+            # Deep does NOT depend on Fast Embed (Semantic) - it generates its own embeddings
+            if not pending_fast:
                 ready = self.storage.list_files_by_stage(
-                    fast_stage=2,  # Fast round complete
+                    fast_stage_gte=1,  # Fast Text complete (stage >= 1)
                     deep_stage=0,  # Deep not started
                     limit=1,
                     folder_id=folder_id,

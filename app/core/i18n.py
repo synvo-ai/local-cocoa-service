@@ -124,44 +124,36 @@ class I18nPrompts:
     # Document summary prompts
     SUMMARY_PROMPTS = {
         "en": (
-            "Write a plain, objective summary of this document in 2-3 sentences (around 60 words). "
-            "Include: the filename, document title, author or organization if known, and what the document is about. "
-            "Use simple language. Do not use markdown formatting, bold, or bullet points."
+            "Write ONE concise sentence (under 30 words) describing what this document is about. "
+            "Be direct and specific. No formatting, no bullet points."
         ),
         "zh": (
-            "用2-3句话（约60字）写一个简单、客观的文档摘要。"
-            "包括：文件名、文档标题、作者或组织（如果已知）以及文档内容。"
-            "使用简单语言。不要使用markdown格式、粗体或项目符号。"
+            "用一句话（30字以内）简洁描述这个文档是关于什么的。"
+            "直接、具体。不要使用格式或项目符号。"
         ),
         "ja": (
-            "この文書の簡潔で客観的な要約を2-3文（約60語）で書いてください。"
-            "含めるもの：ファイル名、文書タイトル、既知の場合は著者または組織、文書の内容。"
-            "簡単な言葉を使用してください。Markdown形式、太字、箇条書きを使用しないでください。"
+            "この文書が何についてのものかを一文（30語以内）で簡潔に説明してください。"
+            "直接的かつ具体的に。フォーマットや箇条書きは不要です。"
         ),
         "ko": (
-            "이 문서의 간단하고 객관적인 요약을 2-3문장(약 60단어)으로 작성하세요."
-            "포함 사항: 파일 이름, 문서 제목, 알려진 경우 저자 또는 조직, 문서 내용."
-            "간단한 언어를 사용하세요. Markdown 형식, 굵게 또는 글머리 기호를 사용하지 마세요."
+            "이 문서가 무엇에 관한 것인지 한 문장(30단어 이내)으로 간결하게 설명하세요."
+            "직접적이고 구체적으로. 형식이나 글머리 기호 없이."
         ),
         "fr": (
-            "Rédigez un résumé simple et objectif de ce document en 2-3 phrases (environ 60 mots). "
-            "Incluez : le nom du fichier, le titre du document, l'auteur ou l'organisation si connu, et le sujet du document. "
-            "Utilisez un langage simple. N'utilisez pas de formatage markdown, de gras ou de puces."
+            "Écrivez UNE phrase concise (moins de 30 mots) décrivant le sujet de ce document. "
+            "Soyez direct et spécifique. Pas de formatage, pas de puces."
         ),
         "de": (
-            "Schreiben Sie eine einfache, objektive Zusammenfassung dieses Dokuments in 2-3 Sätzen (ca. 60 Wörter). "
-            "Enthalten: den Dateinamen, Dokumenttitel, Autor oder Organisation falls bekannt, und worum es im Dokument geht. "
-            "Verwenden Sie einfache Sprache. Verwenden Sie keine Markdown-Formatierung, Fettdruck oder Aufzählungszeichen."
+            "Schreiben Sie EINEN prägnanten Satz (unter 30 Wörtern), der beschreibt, worum es in diesem Dokument geht. "
+            "Seien Sie direkt und spezifisch. Keine Formatierung, keine Aufzählungszeichen."
         ),
         "es": (
-            "Escribe un resumen simple y objetivo de este documento en 2-3 oraciones (alrededor de 60 palabras). "
-            "Incluye: el nombre del archivo, título del documento, autor u organización si se conoce, y de qué trata el documento. "
-            "Usa lenguaje simple. No uses formato markdown, negrita o viñetas."
+            "Escribe UNA oración concisa (menos de 30 palabras) describiendo de qué trata este documento. "
+            "Sé directo y específico. Sin formato, sin viñetas."
         ),
         "ru": (
-            "Напишите простое, объективное резюме этого документа в 2-3 предложениях (около 60 слов). "
-            "Включите: имя файла, название документа, автора или организацию, если известно, и о чем документ. "
-            "Используйте простой язык. Не используйте форматирование markdown, жирный шрифт или маркированные списки."
+            "Напишите ОДНО краткое предложение (до 30 слов), описывающее, о чем этот документ. "
+            "Будьте прямым и конкретным. Без форматирования, без маркеров."
         ),
     }
     

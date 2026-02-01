@@ -86,6 +86,7 @@ class MultiPathPipeline:
 
         all_valid_sub_answers = []
         all_hits = []
+        subquery_summaries = []  # Store the best answer for each sub-query
         
         # Global tracking across subqueries
         global_chunk_index = 1  # Chunks in SQ2 continue from where SQ1 ended
@@ -170,6 +171,16 @@ class MultiPathPipeline:
                 # Pick best confidence or first
                 best = max(current_sq_answers, key=lambda x: x.get("confidence", 0))
                 best_answer = best.get("content")
+                best_confidence = best.get("confidence", 0.8)
+                
+                # Store this sub-query's best answer for final synthesis
+                if best_answer:
+                    subquery_summaries.append({
+                        "sub_query": sq_text,
+                        "answer": best_answer,
+                        "confidence": best_confidence,
+                        "index": i + 1
+                    })
 
             yield json.dumps({
                  "type": "thinking_step",
@@ -205,21 +216,25 @@ class MultiPathPipeline:
             }
         }) + "\n"
 
-        # Prepare list of Dict for synthesis
+        # Build synthesis inputs with both sub-query summaries AND chunk evidence
         synthesis_inputs = []
         for i, ans in enumerate(all_valid_sub_answers):
              synthesis_inputs.append({
-                 # Use the original chunk index, not renumbered
                  "index": ans.get("index", i + 1),
-                 "source": f"{ans.get('source')} (from '{ans.get('sub_query', '')}')",
+                 "source": ans.get('source', 'Unknown'),
                  "content": ans.get("content"),
-                 # confidence is optional if not available
-                 "confidence": 1.0 
+                 "confidence": ans.get("confidence", 1.0),
+                 "has_answer": True,
+                 "metadata": ans.get("metadata", {})
              })
              
         full_response = "" 
         try:
-             async for token in self.synthesis.stream_simple_aggregation(query, synthesis_inputs):
+             async for token in self.synthesis.stream_simple_aggregation(
+                 query, 
+                 synthesis_inputs,
+                 subquery_summaries=subquery_summaries  # Pass sub-query level answers
+             ):
                  full_response += token
                  yield json.dumps({"type": "token", "data": token}) + "\n"
         except Exception as e:

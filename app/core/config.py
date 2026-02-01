@@ -89,6 +89,8 @@ class ServiceEndpoints(BaseSettings):
     """Service endpoints configuration."""
     model_config = _common_config
     
+    main_host: str = Field(alias="LOCAL_SERVICE_MAIN_HOST")
+    main_port: int = Field(alias="LOCAL_SERVICE_MAIN_PORT")
     llm_host: str = Field(alias="LOCAL_SERVICE_LLM_HOST")
     llm_port: int = Field(alias="LOCAL_SERVICE_LLM_PORT")
     embedding_host: str = Field(alias="LOCAL_SERVICE_EMBEDDING_HOST")
@@ -121,11 +123,7 @@ class QdrantConfig(BaseSettings):
     embedding_dim: int = Field(alias="LOCAL_QDRANT_EMBEDDING_DIM")
     metric_type: Literal["COSINE", "DOT", "EUCLID"] = Field(alias="LOCAL_QDRANT_METRIC_TYPE")
 
-class Settings(BaseSettings):
-    env: str = _env_mode
-    is_win: bool = platform.system() == "Windows"
-
-    """Main application settings with automatic .env file loading."""
+class PathSettings(BaseSettings):
     model_config = _common_config
 
     # Path settings
@@ -133,15 +131,40 @@ class Settings(BaseSettings):
     resource_root: Path = _resource_root
     bundle_root: Path = _bundle_root
     plugins_root: Path = _plugins_root
-    models_config_path: Path = Field(alias="LOCAL_MODELS_CONFIG_PATH")
+    user_plugins_root: Optional[Path] = Field(default=None, alias="LOCAL_USER_PLUGINS_ROOT")
+
     service_bin_path: Path = Field(alias="LOCAL_SERVICE_BIN_PATH")
     llama_server_path: Path = Field(alias="LOCAL_LLAMA_SERVER_PATH")
     whisper_server_path: Path = Field(alias="LOCAL_WHISPER_SERVER_PATH")
+
+    # Model filenames (relative to model_root if not absolute)
     model_root_path: Path = Field(alias="LOCAL_MODEL_ROOT_PATH")
+    embedding_model: str = Field(alias="LOCAL_MODEL_EMBEDDING_FILE")
+    rerank_model: str = Field(alias="LOCAL_MODEL_RERANK_FILE")
+    vlm_model: str = Field(alias="LOCAL_MODEL_VLM_FILE")
+    vlm_mmproj: str = Field(alias="LOCAL_MODEL_VLM_MMPROJ_FILE")
+    whisper_model: str = Field(alias="LOCAL_MODEL_WHISPER_FILE")
+
+
+class ModelManagerConfig(BaseSettings):
+    model_config = _common_config
+    
+    # Idle timeout in seconds (default: 5 minutes)
+    idle_timeout_seconds: int = Field(alias="LOCAL_MODEL_IDLE_TIMEOUT")
+
+    # Whether to enable the model manager (auto-start/stop)
+    enabled: bool = Field(alias="LOCAL_MODEL_MANAGER_ENABLED")
+
+class Settings(BaseSettings):
+    env: str = _env_mode
+    is_win: bool = platform.system() == "Windows"
+    model_config = _common_config
+
+    # Path settings
+    paths: PathSettings = Field(default_factory=PathSettings)
+    model_manager: ModelManagerConfig = Field(default_factory=ModelManagerConfig)
 
     endpoints: ServiceEndpoints = Field(default_factory=ServiceEndpoints)
-    main_host: str = Field(alias="LOCAL_SERVICE_MAIN_HOST")
-    main_port: int = Field(alias="LOCAL_SERVICE_MAIN_PORT")
     poll_interval_seconds: int = Field(alias="LOCAL_RAG_POLL_INTERVAL_SECONDS")
     refresh_on_startup: bool = Field(alias="LOCAL_RAG_REFRESH_ON_STARTUP")
     db_name: str = Field(alias="LOCAL_RAG_DB_NAME")
@@ -170,12 +193,13 @@ class Settings(BaseSettings):
     max_snippet_length: int = Field(alias="LOCAL_MAX_SNIPPET_LENGTH")
 
     # Summary settings
-    summary_max_tokens: int = Field(ge=32, alias="LOCAL_SUMMARY_MAX_TOKENS")
+    summary_max_tokens: int = Field(default_factory=lambda: max(int(os.getenv("LOCAL_SUMMARY_MAX_TOKENS", 100)), 32))
     summary_input_max_chars: int = Field(alias="LOCAL_SUMMARY_INPUT_MAX_CHARS")
 
     # PDF settings
     pdf_page_max_tokens: int = Field(ge=256, alias="LOCAL_PDF_PAGE_MAX_TOKENS")
     qdrant: QdrantConfig = Field(default_factory=QdrantConfig)
+    
     pdf_mode: Literal["text", "vision"] = Field(alias="LOCAL_PDF_MODE")
     pdf_one_chunk_per_page: bool = Field(alias="LOCAL_PDF_ONE_CHUNK_PER_PAGE")
 
@@ -205,21 +229,15 @@ class Settings(BaseSettings):
     debug_port: Optional[int] = Field(default=None, alias="LOCAL_SERVICE_DEBUG_PORT")
     debug_wait: bool = Field(default=False, alias="LOCAL_SERVICE_DEBUG_WAIT")
 
-    # Model IDs
-    active_model_id: str = Field(alias="LOCAL_ACTIVE_MODEL_ID")
-    active_embedding_model_id: str = Field(alias="LOCAL_ACTIVE_EMBEDDING_MODEL_ID")
-    active_reranker_model_id: str = Field(alias="LOCAL_ACTIVE_RERANKER_MODEL_ID")
-    active_audio_model_id: str = Field(alias="LOCAL_ACTIVE_AUDIO_MODEL_ID")
-
     @property
     def db_path(self) -> Path:
-        self.runtime_root.mkdir(parents=True, exist_ok=True)
-        return self.runtime_root / self.db_name
+        self.paths.runtime_root.mkdir(parents=True, exist_ok=True)
+        return self.paths.runtime_root / self.db_name
 
     @property
     def settings_path(self) -> Path:
-        self.runtime_root.mkdir(parents=True, exist_ok=True)
-        return self.runtime_root / "rag_settings.json"
+        self.paths.runtime_root.mkdir(parents=True, exist_ok=True)
+        return self.paths.runtime_root / "rag_settings.json"
 
     @property
     def is_dev(self) -> bool:
@@ -241,9 +259,9 @@ class Settings(BaseSettings):
         have been merged. variables derived from another variable (like LOCAL_LLAMA_SERVER_PATH=<LOCAL_RUNTIME_ROOT>/llama-cpp/bin)
         must use this post validator to re-calculate derived values when parent values is ready
         """
-        runtime_root_str = str(self.runtime_root)
-        service_bin_path_str = str(self.service_bin_path)
-        main_host_str = str(self.main_host)
+        runtime_root_str = str(self.paths.runtime_root)
+        service_bin_path_str = str(self.paths.service_bin_path)
+        main_host_str = str(self.endpoints.main_host)
         
         # Define replacement map
         replacements = {
@@ -261,9 +279,9 @@ class Settings(BaseSettings):
             return v
 
         # 1. Resolve top-level string fields
-        self.llama_server_path = Path(_resolve_str(str(self.llama_server_path)))
-        self.whisper_server_path = Path(_resolve_str(str(self.whisper_server_path)))
-        self.model_root_path = Path(_resolve_str(str(self.model_root_path)))
+        self.paths.llama_server_path = Path(_resolve_str(str(self.paths.llama_server_path)))
+        self.paths.whisper_server_path = Path(_resolve_str(str(self.paths.whisper_server_path)))
+        self.paths.model_root_path = Path(_resolve_str(str(self.paths.model_root_path)))
 
         self.endpoints.llm_host = _resolve_str(self.endpoints.llm_host)
         self.endpoints.embedding_host = _resolve_str(self.endpoints.embedding_host)
@@ -302,10 +320,6 @@ class Settings(BaseSettings):
             "enable_memory_extraction": self.enable_memory_extraction,
             "memory_extraction_stage": self.memory_extraction_stage,
             "memory_chunk_size": self.memory_chunk_size,
-            "active_model_id": self.active_model_id,
-            "active_embedding_model_id": self.active_embedding_model_id,
-            "active_reranker_model_id": self.active_reranker_model_id,
-            "active_audio_model_id": self.active_audio_model_id,
             "llm_context_tokens": self.llm_context_tokens,
         }
         try:

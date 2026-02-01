@@ -29,10 +29,6 @@ os.environ["ENV"] = "dev"
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["PYDEVD_DISABLE_FILE_VALIDATION"] = "1"
 os.environ["LOCAL_SERVICE_DEBUG_PORT"] = "5678" # Make sure debuggy use the debug port
-os.environ["LOCAL_ACTIVE_AUDIO_MODEL_ID"] = "whisper-small"
-os.environ["LOCAL_ACTIVE_EMBEDDING_MODEL_ID"] = "embedding-q4"
-os.environ["LOCAL_ACTIVE_MODEL_ID"] = "vlm"
-os.environ["LOCAL_ACTIVE_RERANKER_MODEL_ID"] = "reranker"
 
 # Relative paths
 os.environ["LOCAL_SERVICE_LOG_TO_FILE"] = "true"

@@ -4,7 +4,7 @@ from typing import Optional, Literal
 
 from core.config import settings
 from core.context import get_indexer
-from core.spawn_manager import get_spawn_manager, SpawnConfig
+from core.model_manager import get_model_manager, ModelType
 
 router = APIRouter(prefix="/settings", tags=["settings"])
 
@@ -27,12 +27,6 @@ class SettingsUpdate(BaseModel):
     enable_memory_extraction: Optional[bool] = None
     memory_extraction_stage: Optional[Literal["fast", "deep", "none"]] = None
     memory_chunk_size: Optional[int] = None  # 0=use original chunks, >0=custom size
-    # Sub-process settings
-    active_model_id: Optional[str] = None
-    active_embedding_model_id: Optional[str] = None
-    active_reranker_model_id: Optional[str] = None
-    active_audio_model_id: Optional[str] = None
-    llm_context_tokens: Optional[int] = None
 
 
 @router.get("/")
@@ -55,12 +49,6 @@ async def get_settings():
         "enable_memory_extraction": settings.enable_memory_extraction,
         "memory_extraction_stage": settings.memory_extraction_stage,
         "memory_chunk_size": settings.memory_chunk_size,
-        # Sub-process settings
-        "active_model_id": settings.active_model_id,
-        "active_embedding_model_id": settings.active_embedding_model_id,
-        "active_reranker_model_id": settings.active_reranker_model_id,
-        "active_audio_model_id": settings.active_audio_model_id,
-        "llm_context_tokens": settings.llm_context_tokens,
     }
 
 
@@ -92,9 +80,16 @@ async def update_settings(update: SettingsUpdate):
         settings.rag_chunk_overlap = update.rag_chunk_overlap
     if update.default_indexing_mode is not None:
         settings.default_indexing_mode = update.default_indexing_mode
+    if update.enable_memory_extraction is not None:
+        settings.enable_memory_extraction = update.enable_memory_extraction
+    if update.memory_extraction_stage is not None:
+        settings.memory_extraction_stage = update.memory_extraction_stage
+    if update.memory_chunk_size is not None:
+        settings.memory_chunk_size = update.memory_chunk_size
+
 
     # Handle model related changes
-    manager = get_spawn_manager()
+    manager = get_model_manager()
     restarts = []
 
     if update.active_model_id is not None and update.active_model_id != settings.active_model_id:
@@ -118,62 +113,17 @@ async def update_settings(update: SettingsUpdate):
 
     settings.save_to_file()
 
-    # Restart spawns if needed
+    # Restart models if needed
     for alias in restarts:
-        if alias == 'vlm':
-            descriptor = manager.get_descriptor(settings.active_model_id)
-            mmproj_path = None
-            if descriptor and (descriptor.get('type') == 'vlm' or descriptor.get('id') == 'vlm'):
-                mmproj_id = descriptor.get('mmprojId') or 'vlm-mmproj'
-                mmproj_path = manager.get_model_path(mmproj_id)
-            await manager.stop_spawn('vlm')
-            await manager.start_spawn(SpawnConfig(
-                alias='vlm',
-                model_path=manager.get_model_path(settings.active_model_id),
-                port=settings.endpoints.vlm_port,
-                context_size=settings.llm_context_tokens,
-                threads=4,
-                ngl=999,
-                type='vlm',
-                mmproj_path=mmproj_path
-            ))
-        elif alias == 'embedding':
-            await manager.stop_spawn('embedding')
-            await manager.start_spawn(SpawnConfig(
-                alias='embedding',
-                model_path=manager.get_model_path(settings.active_embedding_model_id),
-                port=settings.endpoints.embedding_port,
-                context_size=8192,
-                threads=4,
-                ngl=999,
-                type='embedding',
-                batch_size=8192,
-                ubatch_size=512,
-                parallel=4
-            ))
-        elif alias == 'reranker':
-            await manager.stop_spawn('reranker')
-            await manager.start_spawn(SpawnConfig(
-                alias='reranker',
-                model_path=manager.get_model_path(settings.active_reranker_model_id),
-                port=settings.endpoints.reranker_port,
-                context_size=4096,
-                threads=2,
-                ngl=999,
-                type='reranking',
-                ubatch_size=2048
-            ))
-        elif alias == 'whisper':
-            await manager.stop_spawn('whisper')
-            await manager.start_spawn(SpawnConfig(
-                alias='whisper',
-                model_path=manager.get_model_path(settings.active_audio_model_id),
-                port=settings.endpoints.whisper_port,
-                context_size=0,
-                threads=4,
-                ngl=0,
-                type='whisper'
-            ))
+        mtype = None
+        if alias == 'vlm': mtype = ModelType.VISION
+        elif alias == 'embedding': mtype = ModelType.EMBEDDING
+        elif alias == 'reranker': mtype = ModelType.RERANK
+        elif alias == 'whisper': mtype = ModelType.WHISPER
+        
+        if mtype:
+            manager.stop_model(mtype)
+            await manager.ensure_model(mtype)
 
     return {
         "status": "ok",

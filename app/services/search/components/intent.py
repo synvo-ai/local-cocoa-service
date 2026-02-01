@@ -163,15 +163,20 @@ Response format (JSON only, no markdown, no extra text):
         if len(query.strip()) < 4:
             return {"needs_decomposition": False, "sub_queries": [query], "strategy": "SINGLE", "keywords": [], "rewritten_query": query}
 
-        # Combined prompt: split queries + extract keywords + rewrite for embedding
-        system_prompt = """Analyze the query and respond with JSON:
-1. Split into sub-questions ending with ?
-2. Extract search keywords (named entities, technical terms, keep phrases like "COVID-19" together)
-3. Rewrite as a concise search query optimized for embedding retrieval (remove question words, keep only key concepts)
-4. Translate non-English to English.
+        # Decomposition-only prompt: just split queries, keywords extracted later per-query
+        system_prompt = """You are a query analyzer. Split complex questions into sub-queries.
 
-Format: {"queries": ["question1?"], "keywords": ["keyword1", "keyword2"], "rewritten": "concise search query"}
-Example: "How many patents did NTU file in 2023" → {"queries": ["How many patents did NTU file in 2023?"], "keywords": ["ntu", "patents", "2023"], "rewritten": "NTU patents filed 2023"}"""
+Output JSON: {"queries": ["q1?", "q2?", ...]}
+
+Rules:
+- Simple query → return as-is.
+- Split when comparing multiple items (years, companies, metrics, etc.)
+- Do not over-split or rephrase.
+
+Examples:
+- "List board members" → {"queries": ["List board members?"]}
+- "Company A's Revenue in 2023 and 2025" → {"queries": ["Company A's Revenue in 2023?", "Company A's Revenue in 2025?"]}
+- "Compare Company A and B's profit" → {"queries": ["Company A's profit?", "Company B's profit?"]}"""
 
         try:
             result = await self.llm_client.chat_complete(
@@ -179,79 +184,25 @@ Example: "How many patents did NTU file in 2023" → {"queries": ["How many pate
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Query: {query}"}
                 ],
-                max_tokens=256,
+                max_tokens=512,
                 temperature=0.1,
             )
             
             result = result.strip()
             logger.debug(f"Raw LLM analysis response:\n{result}")
             
-            # Parsing Strategy
-            strategy = "SINGLE"
-            strategy_match = re.search(r"STRATEGY:\s*(\w+)", result, re.IGNORECASE)
-            if strategy_match:
-                strategy = strategy_match.group(1).upper()
-            
-            # Parsing Queries
+            # Parse JSON to get queries
             sub_queries = []
-            # Try line-based parsing first
-            lines = result.split("\n")
-            in_queries_section = False
-            for line in lines:
-                line = line.strip()
-                if "QUERIES:" in line.upper():
-                    in_queries_section = True
-                    continue
-                if (in_queries_section or len(sub_queries) > 0) and (line.startswith("-") or line.startswith("*") or re.match(r"^\d+\.", line)):
-                    query_text = re.sub(r"^[-\*\s\d\.]+", "", line).strip()
-                    if query_text:
-                        sub_queries.append(query_text)
-            
-            # Fallback to simple list if no section markers found but lines look like a list
-            if not sub_queries:
-                for line in lines:
-                    line = line.strip()
-                    if line.startswith("- ") or line.startswith("* "):
-                        sub_queries.append(line[2:].strip())
-
-            # Fallback to JSON parsing
-            keywords = []
-            rewritten_query = ""
-            if not sub_queries:
-                json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(0))
-                        strategy = parsed.get("strategy", strategy)
-                        sub_queries = parsed.get("queries", parsed.get("sub_queries", []))
-                        keywords = parsed.get("keywords", [])
-                        rewritten_query = parsed.get("rewritten", "")
-                    except: pass
-            else:
-                # Try to extract keywords and rewritten from JSON even if sub_queries found via line parsing
-                json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
-                if json_match:
-                    try:
-                        parsed = json.loads(json_match.group(0))
-                        keywords = parsed.get("keywords", [])
-                        rewritten_query = parsed.get("rewritten", "")
-                    except: pass
+            json_match = re.search(r'\{[^{}]*\}', result, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group(0))
+                    sub_queries = parsed.get("queries", parsed.get("sub_queries", []))
+                except Exception as e:
+                    logger.debug(f"Failed to parse sub-queries JSON: {json_match.group(0)}; error: {e}")
 
             if not sub_queries:
                 sub_queries = [query]
-            
-            # Clean keywords
-            if keywords and isinstance(keywords, list):
-                keywords = [str(k).lower().strip() for k in keywords if k and len(str(k).strip()) > 1]
-                keywords = list(dict.fromkeys(keywords))[:10]  # Dedupe and limit
-            
-            # Fallback rewritten query: join keywords if not provided
-            if not rewritten_query and keywords:
-                rewritten_query = " ".join(keywords)
-            elif not rewritten_query:
-                rewritten_query = query
-            
-            needs_multi = strategy != "SINGLE" or len(sub_queries) > 1
             
             # Deduplicate and ensure question format
             seen = set()
@@ -260,7 +211,6 @@ Example: "How many patents did NTU file in 2023" → {"queries": ["How many pate
                 sq_clean = str(sq).strip()
                 if not sq_clean or sq_clean.lower() in seen:
                     continue
-                # Ensure proper question format
                 sq_clean = self.ensure_question_format(sq_clean, query)
                 if not sq_clean:
                     continue
@@ -269,16 +219,13 @@ Example: "How many patents did NTU file in 2023" → {"queries": ["How many pate
             
             if not filtered:
                 filtered = [self.ensure_question_format(query, query)]
-                needs_multi = False
 
-            logger.info(f"Analysis result: strategy={strategy}, multi_path={needs_multi}, keywords={keywords}, rewritten={rewritten_query}")
+            needs_multi = len(filtered) > 1
+            logger.info(f"Analysis result: multi_path={needs_multi}, queries={filtered}")
             
             return {
                 "needs_decomposition": needs_multi,
                 "sub_queries": filtered[:6],
-                "strategy": strategy,
-                "keywords": keywords,
-                "rewritten_query": rewritten_query
             }
             
         except Exception as e:
@@ -286,10 +233,6 @@ Example: "How many patents did NTU file in 2023" → {"queries": ["How many pate
             return {
                 "needs_decomposition": False, 
                 "sub_queries": [query], 
-                "strategy": "ERROR",
-                "reasoning": str(e),
-                "keywords": [],
-                "rewritten_query": query
             }
 
     def ensure_question_format(self, text: str, original_query: str) -> str:

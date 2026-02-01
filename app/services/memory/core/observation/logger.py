@@ -1,12 +1,12 @@
 import logging
 import traceback
-from typing import Optional
+from typing import Any, Optional
 from enum import Enum
 from functools import lru_cache
 import sys
 import os
+from datetime import datetime
 
-from core.config import settings
 from .log_sanitizer import SanitizingFormatter
 
 
@@ -40,6 +40,9 @@ class LoggerProvider:
 
     def _setup_root_logging(self):
         """Set up logging configuration with privacy-protecting sanitization"""
+        # Get log level from environment variable, default to INFO
+        log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+
         # Create sanitizing formatter for privacy protection
         log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
         sanitizing_formatter = SanitizingFormatter(log_format)
@@ -50,56 +53,27 @@ class LoggerProvider:
 
         # Configure root logger with sanitizing handler
         logging.basicConfig(
-            level=getattr(logging, settings.log_level),
+            level=getattr(logging, log_level),
             handlers=[console_handler],
         )
 
-    def _setup_file_logging(self, log_path: str):
-        """Set up file logging with rotation and sanitization"""
-        try:
-            log_dir = os.path.dirname(log_path)
-            if log_dir:
-                os.makedirs(log_dir, exist_ok=True)
-            
-            from logging.handlers import RotatingFileHandler
-            file_handler = RotatingFileHandler(
-                log_path,
-                maxBytes=10 * 1024 * 1024,
-                backupCount=3,
-                encoding="utf-8"
-            )
-            log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-            sanitizing_formatter = SanitizingFormatter(log_format)
-            file_handler.setFormatter(sanitizing_formatter)
-            
-            logging.getLogger().addHandler(file_handler)
-        except Exception as e:
-            print(f"Failed to setup file logging at {log_path}: {e}", file=sys.stderr)
+    def _setup_logging(self):
+        """Set up logging configuration"""
+        self._setup_root_logging()
 
-    def _disable_noisy_loggers(self):
-        """Disable redundant logs from third-party libraries"""
+        # Disable redundant logs from third-party libraries
         logging.getLogger('urllib3').setLevel(logging.WARNING)
         logging.getLogger('google').setLevel(logging.WARNING)
         logging.getLogger('googleapiclient').setLevel(logging.WARNING)
+        # Disable INFO level logs from httpx to avoid frequent HTTP request logs
         logging.getLogger('httpx').setLevel(logging.WARNING)
+        # Disable debug logs from HTTP-related libraries to avoid redundant network request logs
         logging.getLogger('hpack').setLevel(logging.WARNING)
         logging.getLogger('httpcore').setLevel(logging.WARNING)
         logging.getLogger('pymongo').setLevel(logging.WARNING)
         logging.getLogger('aiokafka').setLevel(logging.WARNING)
-
-    def _setup_logging(self):
-        """Set up logging configuration"""
-        # Clear existing handlers to allow reconfiguration
-        root_logger = logging.getLogger()
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
-
-        self._setup_root_logging()
-
-        if settings.log_to_file:
-            self._setup_file_logging(settings.main_log_path)
-
-        self._disable_noisy_loggers()
+        # Disable debug logs from websockets client to avoid redundant connection logs
+        # logging.getLogger('websockets.client').setLevel(logging.WARNING)
 
     @lru_cache(maxsize=1000)
     def _get_cached_logger(self, module_name: str) -> logging.Logger:

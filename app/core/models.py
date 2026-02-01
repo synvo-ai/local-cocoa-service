@@ -183,6 +183,16 @@ class FileListResponse(BaseModel):
     total: int
 
 
+class SourceRegion(BaseModel):
+    """
+    Represents a spatial region in the source document where chunk text originated.
+    Coordinates are normalized (0-1) relative to page dimensions for resolution independence.
+    """
+    page_num: int  # 1-indexed page number
+    bbox: list[float]  # [x0, y0, x1, y1] normalized 0-1
+    confidence: Optional[float] = None  # OCR confidence if applicable
+
+
 class ChunkSnapshot(BaseModel):
     chunk_id: str
     file_id: str
@@ -200,6 +210,10 @@ class ChunkSnapshot(BaseModel):
     privacy_level: PrivacyLevel = "normal"
     # Memory extraction timestamp (None = not yet extracted)
     memory_extracted_at: Optional[dt.datetime] = None
+    # Spatial metadata for chunk area visualization (optional, backward compatible)
+    page_num: Optional[int] = None  # Primary page number (1-indexed)
+    bbox: Optional[list[float]] = None  # Primary bbox [x0, y0, x1, y1] normalized 0-1
+    source_regions: Optional[list[SourceRegion]] = None  # All source regions for multi-page chunks
 
 
 class IndexRequest(BaseModel):
@@ -271,6 +285,10 @@ class SearchHit(BaseModel):
     analysis_comment: Optional[str] = Field(default=None, alias="analysisComment")
     has_answer: Optional[bool] = Field(default=None, alias="hasAnswer")
     analysis_confidence: Optional[float] = Field(default=None, alias="analysisConfidence")
+    # Spatial metadata for chunk area visualization (optional, backward compatible)
+    page_num: Optional[int] = Field(default=None, alias="pageNum")  # Primary page (1-indexed)
+    bbox: Optional[list[float]] = None  # Primary bbox [x0, y0, x1, y1] normalized 0-1
+    source_regions: Optional[list[SourceRegion]] = Field(default=None, alias="sourceRegions")
 
 
 class AgentStepFile(BaseModel):
@@ -343,7 +361,7 @@ class SearchResponse(BaseModel):
 class QaRequest(BaseModel):
     query: str
     mode: Literal["search", "qa", "chat"] = "qa"
-    limit: int = 5
+    limit: Optional[int] = None  # If not provided, use settings.qa_context_limit
     search_mode: Literal["auto", "knowledge", "direct"] = "auto"
     resume_token: Optional[str] = None
     # Scope isolation: restrict search to specific folders (for test mode / benchmarks)

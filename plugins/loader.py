@@ -443,10 +443,10 @@ class PluginLoader:
 _plugin_loader: Optional[PluginLoader] = None
 
 
-def init_plugin_loader(plugins_dir: Path) -> PluginLoader:
-    """Initialize the global plugin loader"""
+def init_plugin_loader(sys_plugins_dir: Path, user_plugins_dir: Optional[Path] = None) -> PluginLoader:
+    """Initialize the global plugin loader with system and optional user plugin directories"""
     global _plugin_loader
-    _plugin_loader = PluginLoader(plugins_dir)
+    _plugin_loader = PluginLoader(sys_plugins_dir, user_plugins_dir)
     return _plugin_loader
 
 
@@ -456,11 +456,15 @@ def get_plugin_loader() -> Optional[PluginLoader]:
 
 def init_all_plugins(app: "FastAPI"):
     try:
-        # 1. Try Bundled path (preferred for bundled onefile/onedir)
-        plugin_loader = init_plugin_loader(settings.plugins_root)
+        # Initialize with both system and user plugin directories
+        plugin_loader = init_plugin_loader(
+            settings.paths.plugins_root,
+            settings.paths.user_plugins_root
+        )
         plugin_loader.discover_plugins()
 
         registered_count = plugin_loader.register_all_routers(app)
         logger.info(f"Plugin system initialized: {registered_count} plugins loaded")
     except Exception as e:
         logger.error(f"Failed to initialize plugin system: {e}")
+

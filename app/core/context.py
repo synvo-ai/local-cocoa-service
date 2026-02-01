@@ -7,9 +7,22 @@ from typing import Optional
 from services.llm.client import EmbeddingClient, LlmClient, RerankClient, TranscriptionClient
 from .config import settings
 
+# Add plugins directory to path for importing plugin services
+# We import directly from service modules to avoid circular imports with routers
+if getattr(sys, 'frozen', False):
+    # Running in a PyInstaller bundle inside Electron resources/local_rag_dist/local_rag_server/
+    # The standard plugins directory is at resources/plugins
+    # Path(sys.executable) is .../resources/local_rag_dist/local_rag_server/local_rag_server.exe
+    _plugins_path = Path(sys.executable).parent.parent.parent / "plugins"
+else:
+    _plugins_path = (Path(__file__).resolve().parent.parent.parent / "plugins")
+
+if str(_plugins_path) not in sys.path:
+    sys.path.insert(0, str(_plugins_path))
+
 # Import plugin services - import from service module directly, NOT from __init__
-# These are loaded lazily in get_xxx_service functions to avoid circular imports
-# and to ensure the plugins directory is in sys.path first.
+from mail.backend.service import EmailService
+from notes.backend.service import NotesService
 
 from services.indexer import Indexer
 from services.search.engine import SearchEngine
@@ -28,6 +41,8 @@ indexer = Indexer(
     transcription_client=transcription_client,
 )
 search_engine = SearchEngine(storage, embedding_client, rerank_client, llm_client, vectors=get_vector_store())
+email_service = EmailService(storage, indexer)
+notes_service = NotesService(storage, indexer)
 
 
 def get_storage() -> IndexStorage:
@@ -58,26 +73,9 @@ def get_transcription_client() -> Optional[TranscriptionClient]:
     return transcription_client
 
 
-_notes_service = None
+def get_email_service() -> EmailService:
+    return email_service
 
 
-def get_notes_service():
-    """Get the singleton NotesService instance."""
-    global _notes_service
-    if _notes_service is None:
-        from notes.backend.service import NotesService
-        _notes_service = NotesService(storage, indexer)
-    return _notes_service
-
-
-_email_service = None
-
-
-def get_email_service():
-    """Get the singleton EmailService instance."""
-    global _email_service
-    if _email_service is None:
-        from mail.backend.service import EmailService
-        _email_service = EmailService(storage, indexer)
-    return _email_service
-
+def get_notes_service() -> NotesService:
+    return notes_service

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import List, Optional
 
 import fitz  # PyMuPDF
 
@@ -12,7 +13,7 @@ except ImportError:  # pragma: no cover
     np = None
     HAS_NUMPY = False
 
-from .base import BaseParser, ParsedContent
+from .base import BaseParser, ParsedContent, TextBlockInfo
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +34,17 @@ class PdfParser(BaseParser):
             texts: list[str] = []
             # List of (start_offset, end_offset, page_num) in the concatenated full_text.
             page_mapping: list[tuple[int, int, int]] = []
+            # Text blocks with spatial information for chunk area visualization
+            all_text_blocks: List[TextBlockInfo] = []
 
             total_pages = len(doc)
             cursor = 0
 
             for page_index, page in enumerate(doc, start=1):
-                # Use enhanced extraction logic
-                text = self._extract_text_enhanced(page)
+                # Use enhanced extraction logic with spatial metadata
+                text, page_blocks = self._extract_text_with_blocks(page, page_index, cursor)
                 texts.append(text)
+                all_text_blocks.extend(page_blocks)
 
                 start = cursor
                 cursor += len(text)
@@ -66,10 +70,93 @@ class PdfParser(BaseParser):
                 metadata=metadata,
                 page_count=total_pages,
                 page_mapping=page_mapping,
+                text_blocks=all_text_blocks if all_text_blocks else None,
             )
 
         finally:
             doc.close()
+
+    def _extract_text_with_blocks(
+        self, page, page_index: int, base_offset: int
+    ) -> tuple[str, List[TextBlockInfo]]:
+        """
+        Extract text from a page along with text blocks that have spatial information.
+        Returns (text, list of TextBlockInfo).
+        """
+        page_width = page.rect.width
+        page_height = page.rect.height
+
+        # Get text blocks with bounding boxes using PyMuPDF's dict extraction
+        # This gives us block-level structure with coordinates
+        page_dict = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+
+        text_blocks: List[TextBlockInfo] = []
+        block_texts: list[str] = []
+        char_cursor = base_offset
+
+        for block in page_dict.get("blocks", []):
+            if block.get("type") != 0:  # type 0 = text block
+                continue
+
+            # Get block bounding box
+            block_bbox = block.get("bbox", (0, 0, page_width, page_height))
+            x0, y0, x1, y1 = block_bbox
+
+            # Normalize coordinates to 0-1 range
+            norm_x0 = x0 / page_width if page_width > 0 else 0
+            norm_y0 = y0 / page_height if page_height > 0 else 0
+            norm_x1 = x1 / page_width if page_width > 0 else 1
+            norm_y1 = y1 / page_height if page_height > 0 else 1
+
+            # Extract text from the block's lines and spans
+            block_text_parts: list[str] = []
+            for line in block.get("lines", []):
+                line_text = ""
+                for span in line.get("spans", []):
+                    span_text = span.get("text", "")
+                    line_text += span_text
+                if line_text.strip():
+                    block_text_parts.append(line_text)
+
+            block_text = "\n".join(block_text_parts)
+            if not block_text.strip():
+                continue
+
+            char_start = char_cursor
+            char_end = char_cursor + len(block_text)
+
+            text_blocks.append(TextBlockInfo(
+                text=block_text,
+                page_num=page_index,
+                bbox=(norm_x0, norm_y0, norm_x1, norm_y1),
+                char_start=char_start,
+                char_end=char_end,
+                confidence=None,  # PyMuPDF doesn't provide confidence
+                block_type="text",
+            ))
+
+            block_texts.append(block_text)
+            char_cursor = char_end + 2  # +2 for "\n\n" separator
+
+        # Join blocks with double newlines
+        full_text = "\n\n".join(block_texts)
+
+        # If we didn't get good block-level extraction, fall back to enhanced extraction
+        if not text_blocks:
+            full_text = self._extract_text_enhanced(page)
+            # Create a single block for the entire page
+            if full_text.strip():
+                text_blocks.append(TextBlockInfo(
+                    text=full_text,
+                    page_num=page_index,
+                    bbox=(0.0, 0.0, 1.0, 1.0),  # Full page
+                    char_start=base_offset,
+                    char_end=base_offset + len(full_text),
+                    confidence=None,
+                    block_type="text",
+                ))
+
+        return full_text, text_blocks
 
     def _extract_images(self, page) -> list[dict]:
         """Extract images from a PyMuPDF page as bytes."""

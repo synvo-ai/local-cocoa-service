@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 from services.chunker import ChunkingPipeline, chunking_pipeline
+from services.parser.base import TextBlockInfo
 from core.config import settings
 from core.content import ContentRouter, content_router
 from core.models import (
@@ -23,9 +24,11 @@ from core.models import (
     IngestArtifact,
     infer_kind,
 )
+from services.llm.client import LlmClient
 from services.storage import IndexStorage
 from ..scanner import fingerprint  # Note: checksum removed for performance
 from ..state import StateManager
+from .. import prompts
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,7 @@ class FastTextProcessor:
         *,
         content: ContentRouter = content_router,
         chunker: ChunkingPipeline = chunking_pipeline,
+        llm_client: Optional[LlmClient] = None,
         enable_memory_extraction: bool = True,
         memory_user_id: str = "default_user",
     ) -> None:
@@ -73,6 +77,7 @@ class FastTextProcessor:
         self.state_manager = state_manager
         self.content_router = content
         self.chunker = chunker
+        self.llm_client = llm_client or LlmClient()
         self.enable_memory_extraction = enable_memory_extraction
         self.memory_user_id = memory_user_id
 
@@ -156,8 +161,8 @@ class FastTextProcessor:
                 page_mapping=parsed.page_mapping
             )
 
-            # Build chunks
-            chunks = self._build_chunks(file_record, artifact)
+            # Build chunks (pass text_blocks for spatial metadata)
+            chunks = self._build_chunks(file_record, artifact, text_blocks=parsed.text_blocks)
             
             # Set chunk version to "fast"
             for chunk in chunks:
@@ -171,9 +176,10 @@ class FastTextProcessor:
             file_record.metadata["chunk_count_fast"] = len(chunks)
             file_record.metadata["chunk_strategy"] = "fast_text_v1"
             
-            # Generate summary from first chunk
-            if chunks and chunks[0].text:
-                file_record.summary = chunks[0].text[:500]
+            # Note: Summary generation is deferred to batch processing
+            # after all files complete fast_text stage.
+            # Store the text length for later summary generation
+            file_record.metadata["text_length"] = len(parsed.text) if parsed.text else 0
 
             # Update stage
             now = dt.datetime.now(dt.timezone.utc)
@@ -219,12 +225,187 @@ class FastTextProcessor:
         finally:
             self.state_manager.reset_active_state()
 
+    def _calculate_max_input_chars(self) -> int:
+        """Dynamically calculate max input chars based on LLM context length.
+        
+        Reserves tokens for:
+        - System prompt (~100 tokens)
+        - File metadata (~50 tokens)
+        - Output tokens (summary_max_tokens)
+        - Safety margin (10%)
+        
+        Returns:
+            Maximum number of characters for document content
+        """
+        context_tokens = getattr(settings, "llm_context_tokens", 32768)
+        chars_per_token = getattr(settings, "llm_chars_per_token", 8)
+        summary_max_tokens = getattr(settings, "summary_max_tokens", 256)
+        
+        # Reserve tokens for system prompt, metadata, and output
+        reserved_tokens = 100 + 50 + summary_max_tokens
+        # Apply 10% safety margin
+        available_tokens = int((context_tokens - reserved_tokens) * 0.9)
+        
+        max_chars = available_tokens * chars_per_token
+        
+        # Also respect the explicit setting if it's lower
+        explicit_limit = getattr(settings, "summary_input_max_chars", 100000)
+        
+        return min(max_chars, explicit_limit)
+
+    async def _generate_llm_summary(
+        self,
+        record: FileRecord,
+        text: str,
+    ) -> str:
+        """Generate a summary using LLM instead of simple text truncation.
+        
+        Args:
+            record: The file record with metadata
+            text: The full text content of the file
+            
+        Returns:
+            A concise summary of the file content
+        """
+        if not text or not text.strip():
+            return ""
+        
+        # Prepare metadata context
+        metadata_block = self._format_file_metadata_for_llm(record)
+        
+        # Dynamically calculate max input chars based on context length
+        max_input_chars = self._calculate_max_input_chars()
+        truncated_content = text.strip()[:max_input_chars]
+        if len(text) > max_input_chars:
+            truncated_content += "\n...[content truncated]..."
+        
+        prompt = f"{metadata_block}\n\nContent:\n{truncated_content}"
+        
+        try:
+            messages = [
+                {"role": "system", "content": prompts.DEFAULT_SUMMARY_PROMPT},
+                {"role": "user", "content": prompt},
+            ]
+            summary = await self.llm_client.chat_complete(
+                messages,
+                max_tokens=max(int(getattr(settings, "summary_max_tokens", 256)), 32),
+                temperature=0.2,
+            )
+            cleaned = (summary or "").strip()
+            if cleaned:
+                logger.info("LLM summary generated for %s: %d chars", record.name, len(cleaned))
+                return cleaned
+        except Exception as exc:
+            logger.warning("LLM summarization failed for %s: %s, falling back to truncation", record.path, exc)
+        
+        # Fallback: use first 500 chars if LLM fails
+        return text.strip()[:500]
+    
+    def _format_file_metadata_for_llm(self, record: FileRecord) -> str:
+        """Format file metadata as context for LLM summarization."""
+        modified = record.modified_at.isoformat() if record.modified_at else "unknown"
+        created = record.created_at.isoformat() if record.created_at else "unknown"
+        size = str(record.size) if record.size is not None else "unknown"
+        return "\n".join([
+            f"File name: {record.name}",
+            f"Path: {record.path}",
+            f"Kind: {record.kind}",
+            f"Extension: {record.extension}",
+            f"Size bytes: {size}",
+            f"Modified at: {modified}",
+            f"Created at: {created}",
+        ])
+
+    async def generate_summaries_batch(
+        self,
+        folder_id: Optional[str] = None,
+        batch_size: int = 50,
+    ) -> int:
+        """Generate LLM summaries for all files that have completed fast_text but lack summaries.
+        
+        This is called after all files complete fast_text stage to batch process summaries.
+        
+        Args:
+            folder_id: Optional folder to limit processing to
+            batch_size: Number of files to process in each batch
+            
+        Returns:
+            Number of files successfully summarized
+        """
+        success_count = 0
+        
+        # Get files that need summary (fast_stage >= 1 and no summary)
+        files_needing_summary = self.storage.list_files_needing_summary(
+            folder_id=folder_id,
+            limit=batch_size,
+        )
+        
+        if not files_needing_summary:
+            logger.info("No files need summary generation")
+            return 0
+        
+        logger.info("Generating summaries for %d files", len(files_needing_summary))
+        
+        for file_record in files_needing_summary:
+            try:
+                # Update state for UI
+                self.state_manager.set_active_stage(
+                    stage="fast_summary",
+                    detail=f"Generating summary for {file_record.name}",
+                    progress=success_count / len(files_needing_summary),
+                    event=f"Summarizing {file_record.name}"
+                )
+                
+                # Get the file's text content from chunks
+                chunks = self.storage.chunks_for_file(file_record.id)
+                if not chunks:
+                    # No chunks found - this file needs to be re-indexed
+                    # Reset fast_stage to 0 so it will be re-processed
+                    logger.warning(
+                        "No chunks found for %s (id=%s), resetting fast_stage to 0 for re-indexing",
+                        file_record.name, file_record.id
+                    )
+                    self.storage.update_file_stage(file_record.id, fast_stage=0)
+                    continue
+                
+                # Concatenate chunk texts to reconstruct file content
+                text = "\n".join(c.text for c in chunks if c.text)
+                
+                if not text.strip():
+                    logger.warning("No text content in chunks for %s, skipping summary", file_record.name)
+                    continue
+                
+                # Generate summary
+                summary = await self._generate_llm_summary(file_record, text)
+                
+                if summary:
+                    file_record.summary = summary
+                    self.storage.upsert_file(file_record)
+                    success_count += 1
+                    logger.info("Summary generated for %s", file_record.name)
+                
+            except Exception as exc:
+                logger.warning("Failed to generate summary for %s: %s", file_record.path, exc)
+                continue
+        
+        self.state_manager.reset_active_state()
+        logger.info("Batch summary generation complete: %d/%d files", success_count, len(files_needing_summary))
+        
+        return success_count
+
     def _build_chunks(
         self,
         record: FileRecord,
         artifact: IngestArtifact,
+        text_blocks=None,
     ) -> list[ChunkSnapshot]:
-        """Build text chunks from the artifact."""
+        """Build text chunks from the artifact.
+
+        Args:
+            record: The file record
+            artifact: The ingest artifact containing text and metadata
+            text_blocks: Optional list of TextBlockInfo with spatial data for chunk area visualization
+        """
         text = artifact.text
         if not text or not text.strip():
             return []
@@ -238,7 +419,7 @@ class FastTextProcessor:
             page_texts = record.metadata.get("page_texts") or []
             if page_texts and isinstance(page_texts, list):
                 return self._build_pdf_chunks_by_page(
-                    record, page_texts, chunk_tokens, now
+                    record, page_texts, chunk_tokens, now, text_blocks=text_blocks
                 )
 
         # For non-PDF files: use standard chunking
@@ -249,11 +430,26 @@ class FastTextProcessor:
             text,
             page_mapping=artifact.page_mapping,
             chunk_tokens=chunk_tokens,
-            overlap_tokens=overlap_tokens
+            overlap_tokens=overlap_tokens,
+            text_blocks=text_blocks,
         )
+
+        from core.models import SourceRegion
 
         snapshots = []
         for payload in payloads:
+            # Convert source_regions from chunker types to model types
+            source_regions = None
+            if payload.source_regions:
+                source_regions = [
+                    SourceRegion(
+                        page_num=r.page_num,
+                        bbox=list(r.bbox),
+                        confidence=r.confidence,
+                    )
+                    for r in payload.source_regions
+                ]
+
             snapshots.append(ChunkSnapshot(
                 chunk_id=payload.chunk_id,
                 file_id=record.id,
@@ -266,6 +462,9 @@ class FastTextProcessor:
                 metadata=payload.metadata,
                 created_at=now,
                 version="fast",
+                page_num=payload.page_num,
+                bbox=list(payload.bbox) if payload.bbox else None,
+                source_regions=source_regions,
             ))
 
         if not snapshots and text.strip():
@@ -293,13 +492,32 @@ class FastTextProcessor:
         page_texts: list[str],
         chunk_tokens: int,
         now: dt.datetime,
+        text_blocks=None,
     ) -> list[ChunkSnapshot]:
         """
         Build chunks for PDF by processing each page separately.
         This ensures page numbers are always correct - no cross-page content mixing.
+
+        Args:
+            record: The file record
+            page_texts: List of text content for each page
+            chunk_tokens: Target chunk size in tokens
+            now: Current timestamp
+            text_blocks: Optional list of TextBlockInfo with spatial data
         """
+        from core.models import SourceRegion
+
         snapshots: list[ChunkSnapshot] = []
         ordinal = 0
+
+        # Group text_blocks by page for efficient lookup
+        blocks_by_page = {}
+        if text_blocks:
+            for block in text_blocks:
+                page = block.page_num
+                if page not in blocks_by_page:
+                    blocks_by_page[page] = []
+                blocks_by_page[page].append(block)
 
         for page_num, page_text in enumerate(page_texts, start=1):
             page_text = page_text or ""
@@ -309,24 +527,56 @@ class FastTextProcessor:
             # Build page-level page_mapping (single page)
             page_mapping = [(0, len(page_text), page_num)]
 
+            # Get text_blocks for this page, adjusted to page-relative offsets.
+            # Text blocks have absolute char offsets (from full document), but the
+            # chunker receives only page_text (0-based), so we must rebase offsets.
+            page_blocks = blocks_by_page.get(page_num)
+            if page_blocks:
+                page_base = page_blocks[0].char_start  # first block's absolute offset
+                page_blocks = [
+                    TextBlockInfo(
+                        text=b.text,
+                        page_num=b.page_num,
+                        bbox=b.bbox,
+                        char_start=b.char_start - page_base,
+                        char_end=b.char_end - page_base,
+                        confidence=b.confidence,
+                        block_type=b.block_type,
+                    )
+                    for b in page_blocks
+                ]
+
             # Chunk this page with no overlap
             payloads = self.chunker.build(
                 record.id,
                 page_text,
                 page_mapping=page_mapping,
                 chunk_tokens=chunk_tokens,
-                overlap_tokens=0  # No overlap for PDF to keep page boundaries clean
+                overlap_tokens=0,  # No overlap for PDF to keep page boundaries clean
+                text_blocks=page_blocks,
             )
 
             for payload in payloads:
                 # Override chunk_id to include page number for uniqueness
                 chunk_id = f"{record.id}::fast::p{page_num}::{ordinal}"
-                
+
                 # Ensure page metadata is correct
                 metadata = payload.metadata.copy()
                 metadata["page_numbers"] = [page_num]
                 metadata["page_start"] = page_num
                 metadata["page_end"] = page_num
+
+                # Convert source_regions from chunker types to model types
+                source_regions = None
+                if payload.source_regions:
+                    source_regions = [
+                        SourceRegion(
+                            page_num=r.page_num,
+                            bbox=list(r.bbox),
+                            confidence=r.confidence,
+                        )
+                        for r in payload.source_regions
+                    ]
 
                 snapshots.append(ChunkSnapshot(
                     chunk_id=chunk_id,
@@ -340,6 +590,9 @@ class FastTextProcessor:
                     metadata=metadata,
                     created_at=now,
                     version="fast",
+                    page_num=payload.page_num or page_num,
+                    bbox=list(payload.bbox) if payload.bbox else None,
+                    source_regions=source_regions,
                 ))
                 ordinal += 1
 

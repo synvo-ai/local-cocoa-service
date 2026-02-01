@@ -117,15 +117,23 @@ class SynthesisComponent:
             return "I cannot find a clear answer in the provided documents."
         
         system_prompt = (
-            "You are a strict, fact-based assistant. Answer the question based ONLY on the provided evidence. "
-            "If the evidence does not contain the specific information requested, explicitly state it is not available. "
-            "Do NOT infer or guess. Cite each fact using the numbered brackets from evidence."
+            "You are a strict, fact-based assistant. Answer the question based ONLY on the provided evidence.\n"
+            "If the evidence does not contain the specific information requested (e.g., specific year or figure), "
+            "explicitly state that the information is not available.\n"
+            "Do NOT infer, guess, or use data from other years to fill gaps.\n"
+            "CRITICAL: Use ONLY the exact bracket format [N] for citations where N is the evidence number.\n"
+            "Do NOT write 'Evidence [N]' or '(source N)' - just [N].\n"
+            "Place citation [N] immediately after each fact.\n"
+            "IMPORTANT: Do NOT repeat yourself. Give a single, concise answer.\n"
+            "If evidence conflicts, use the most specific/reliable source and ignore vague statements.\n"
+            "Be coherent - do not contradict yourself.\n"
+            "Write naturally and fluently, with government-style professional formatting.\n"
         )
         
         user_prompt = (
             f"Question: {query}\n\n"
             f"Evidence:\n{evidence_text}\n\n"
-            "Answer in 1-2 sentences. Cite each fact with its source number in brackets."
+            "Cite each fact with [N] right after it. Do not repeat. Answer coherently, do not contradict yourself. Answer the question directly."
         )
         
         try:
@@ -134,7 +142,7 @@ class SynthesisComponent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=250,
+                max_tokens=800,
             )
             return final_answer.strip()
         except Exception as e:
@@ -147,10 +155,16 @@ class SynthesisComponent:
     async def stream_simple_aggregation(
         self,
         query: str,
-        sub_answers: List[Dict[str, Any]]
+        sub_answers: List[Dict[str, Any]],
+        subquery_summaries: List[Dict[str, Any]] | None = None
     ) -> AsyncIterable[str]:
         """
         Streaming version of simple_aggregation.
+        
+        Args:
+            query: The original user question
+            sub_answers: Chunk-level evidence with references
+            subquery_summaries: Optional list of sub-query level answers (already synthesized)
         """
         evidence_lines = [
             self._format_evidence_line(ans)
@@ -164,20 +178,34 @@ class SynthesisComponent:
              yield "I cannot find a clear answer in the provided documents."
              return
 
+        # Build sub-query summaries section if available
+        summaries_section = ""
+        if subquery_summaries:
+            summary_lines = []
+            for sq in subquery_summaries:
+                summary_lines.append(f"• {sq['sub_query']}\n  → {sq['answer']}")
+            summaries_section = "KEY FINDINGS FROM SUB-QUERIES:\n" + "\n".join(summary_lines) + "\n\n"
+
         system_prompt = (
-            "You are a strict, fact-based assistant. Answer the question based ONLY on the provided evidence. "
+            "You are a strict, fact-based assistant. Answer the question based ONLY on the provided evidence.\n"
             "If the evidence does not contain the specific information requested (e.g., specific year or figure), "
-            "explicitly state that the information is not available. "
-            "Do NOT infer, guess, or use data from other years to fill gaps. "
-            "CRITICAL: Use ONLY the exact bracket format [N] for citations where N is the evidence number. "
-            "Do NOT write 'Evidence [N]' or '(source N)' - just [N]. "
-            "IMPORTANT: Do NOT repeat yourself. Give a single, concise answer."
+            "explicitly state that the information is not available.\n"
+            "Do NOT infer, guess, or use data from other years to fill gaps.\n"
+            "CRITICAL: Use ONLY the exact bracket format [N] for citations where N is the evidence number.\n"
+            "Do NOT write 'Evidence [N]' or '(source N)' - just [N].\n"
+            "Place citation [N] immediately after each fact.\n"
+            "IMPORTANT: Do NOT repeat yourself. Give a single, concise answer.\n"
+            "Meta Answer is provided, but you should also refer to the raw evidence to answer the question with citations."
+            "If evidence conflicts, use the most specific/reliable source and ignore vague statements.\n"
+            "Be coherent - do not contradict yourself.\n"
+            "Write naturally and fluently, with government-style professional formatting.\n"
         )
 
         user_prompt = (
             f"Question: {query}\n\n"
-            f"Evidence:\n{evidence_text}\n\n"
-            "Answer in 1-2 sentences. Cite facts using [N] format. Do not repeat."
+            f"Meta Answer: {summaries_section}"
+            f"EVIDENCE (for citations):\n{evidence_text}\n\n"
+            "Cite each fact with [N] right after it. Do not repeat. Answer coherently, do not contradict yourself. Answer the question directly."
         )
 
         # DEBUG LOGGING
@@ -197,7 +225,7 @@ class SynthesisComponent:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                max_tokens=250,
+                max_tokens=800,
             ):
                 collected_answer.append(token)
                 yield token
@@ -251,15 +279,23 @@ class SynthesisComponent:
         )
         
         system_prompt = (
-            "You are a strict, fact-based research analyst. Integrate multiple group summaries into one authoritative answer based ONLY on the provided summaries.\n"
-            "If the information is missing, state it clearly. Do NOT invent or infer data.\n"
-            "IMPORTANT: Preserve the original citations (e.g. [12], [32]) found in the summaries. Do NOT use [Group n] citations."
+            "You are a strict, fact-based assistant. Answer the question based ONLY on the provided evidence.\n"
+            "If the evidence does not contain the specific information requested (e.g., specific year or figure), "
+            "explicitly state that the information is not available.\n"
+            "Do NOT infer, guess, or use data from other years to fill gaps.\n"
+            "CRITICAL: Use ONLY the exact bracket format [N] for citations where N is the evidence number.\n"
+            "Do NOT write 'Evidence [N]' or '(source N)' - just [N].\n"
+            "Place citation [N] immediately after each fact.\n"
+            "IMPORTANT: Do NOT repeat yourself. Give a single, concise answer.\n"
+            "If evidence conflicts, use the most specific/reliable source and ignore vague statements.\n"
+            "Be coherent - do not contradict yourself.\n"
+            "Write naturally and fluently, with government-style professional formatting.\n"
         )
         
         user_prompt = (
             f"Question: {query}\n\n"
             f"Group Summaries:\n{summaries_text}\n\n"
-            "Final Answer:"
+            "Cite each fact with [N] right after it. Do not repeat. Answer coherently, do not contradict yourself. Answer the question directly."
         )
         
         try:
@@ -269,7 +305,6 @@ class SynthesisComponent:
                     {"role": "user", "content": user_prompt}
                 ],
                 max_tokens=600,
-                temperature=0.3,
             )
             return final_answer.strip()
         except Exception as e:

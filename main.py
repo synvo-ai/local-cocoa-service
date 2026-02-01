@@ -61,9 +61,9 @@ def main():
     from app.core.config import settings
 
     if settings.is_dev and not getattr(sys, 'frozen', False):  # Only reload when not frozen and in debug mode
-        uvicorn.run("app.app:app", host=settings.main_host, port=settings.main_port, reload=True)
+        uvicorn.run("app.app:app", host=settings.endpoints.main_host, port=settings.endpoints.main_port, reload=True)
     else:
-        uvicorn.run("app.app:app", host=settings.main_host, port=settings.main_port, reload=False)
+        uvicorn.run("app.app:app", host=settings.endpoints.main_host, port=settings.endpoints.main_port, reload=False)
 
 
 if __name__ == "__main__":

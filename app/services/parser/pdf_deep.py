@@ -49,17 +49,29 @@ class PdfDeepParser(PdfParser):
             self._vlm = VisionProcessor(get_llm_client())
         return self._vlm
 
+    @property
+    def vlm(self) -> VisionProcessor:
+        """Lazy initialization of VisionProcessor to avoid circular import."""
+        if self._vlm is None:
+            from core.context import get_llm_client
+            vlm_client = get_llm_client()
+            self._vlm = VisionProcessor(vlm_client)
+        return self._vlm
+
     def turn_pdf_into_images(
         self,
         path: Path,
         *,
         as_array: bool = True,
         output_dir: Path | None = None,
-        zoom: float = 1.0,
+        zoom: float = 2.0,
     ) -> dict:
         """Render PDF pages into images.
 
         Returns a dict of {page_number: <np.ndarray|path>}.
+        
+        Args:
+            zoom: Rendering scale factor. 2.0 = 144 DPI (recommended for tables).
         """
         if not fitz:
             raise ImportError("PyMuPDF (fitz) is not installed.")
@@ -134,8 +146,9 @@ class PdfDeepParser(PdfParser):
         """
         try:
             # Use centralized vision processor to render images
-
-            attachments = self.turn_pdf_into_images(path)
+            # Use zoom=2.0 for higher resolution (144 DPI instead of 72 DPI)
+            # This improves VLM accuracy for tables and small text in financial reports
+            attachments = self.turn_pdf_into_images(path, zoom=2.0)
         except Exception as e:
             raise ImportError(
                 f"Failed to convert PDF to images: {e}. "

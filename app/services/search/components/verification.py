@@ -98,10 +98,10 @@ class VerificationComponent:
         Simple chunk processing: LLM answers the question or says NO_ANSWER.
         """
         system_prompt = (
-            "You are a fact-based and objective assistant that provides complete answers.\n"
-            "Answer the question based on the given context in 1-2 complete sentences.\n"
-            "If the context does NOT directly answer the question, reply exactly: NO_ANSWER\n"
-            "Do not make up connections or assumptions."
+            "You are a helpful assistant that extracts relevant information.\n"
+            "Based on the context, answer the question in 1-2 sentences.\n"
+            "If the context contains ANY related or partially relevant information, summarize what you found.\n"
+            "Only reply NO_ANSWER if the context is completely unrelated to the question."
         )
         
         # Build file context from metadata

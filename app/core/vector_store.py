@@ -7,7 +7,7 @@ from typing import Iterable, Optional, Sequence
 from qdrant_client import QdrantClient, models
 
 from .config import settings
-from .models import SearchHit, VectorDocument
+from .models import SearchHit, VectorDocument, SourceRegion
 from .request_context import RequestContext, get_request_context
 
 
@@ -187,6 +187,16 @@ class VectorStore:
             chunk_id = metadata.get("chunk_id") or original_id
             metadata.setdefault("chunk_id", chunk_id)
 
+            # Extract spatial metadata (backward compatible - may be None)
+            page_num = metadata.get("page_num")
+            bbox = metadata.get("bbox")
+            source_regions = None
+            if metadata.get("source_regions"):
+                try:
+                    source_regions = [SourceRegion(**r) for r in metadata["source_regions"]]
+                except (TypeError, KeyError):
+                    pass
+
             hits.append(
                 SearchHit(
                     file_id=file_id,
@@ -195,6 +205,9 @@ class VectorStore:
                     snippet=metadata.get("snippet"),
                     metadata=metadata,
                     chunk_id=chunk_id,
+                    page_num=page_num,
+                    bbox=bbox,
+                    source_regions=source_regions,
                 )
             )
 

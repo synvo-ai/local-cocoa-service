@@ -331,9 +331,10 @@ class StandardPipeline:
 
         # Step 1: Keyword Search (keywords already shown in Analyzing Query step)
         keyword_step_id = step_generator()
+        keywords_display = ', '.join(keywords[:5]) if keywords else query
         yield thinking_step(
             keyword_step_id, "search", "Keyword Search", "running",
-            f"Searching: {', '.join(keywords[:5]) if keywords else query}"
+            f"Searching: {keywords_display}"
         )
         
         keyword_hits = []
@@ -345,17 +346,29 @@ class StandardPipeline:
         except Exception as e:
             logger.warning(f"Keyword search failed: {e}")
 
-        hits_data = [h.model_dump(by_alias=True) for h in keyword_hits]
+        # Deduplicate keyword hits by page BEFORE emitting thinking_step
+        # This ensures consistent index assignment between thinking_step and _process_hits_generator
+        keyword_hits_deduped = self._dedupe_hits_by_page(keyword_hits) if keyword_hits else []
+        logger.debug(f"Keyword hits: {len(keyword_hits)} -> {len(keyword_hits_deduped)} after page dedup")
+
+        # Assign global indices to deduped hits BEFORE emitting thinking_step
+        for i, hit in enumerate(keyword_hits_deduped):
+            if hit.metadata is None:
+                hit.metadata = {}
+            hit.metadata["index"] = current_index + i
+
+        hits_data = [h.model_dump(by_alias=True) for h in keyword_hits_deduped]
         yield thinking_step(
             keyword_step_id, "search", "Keyword Search", "complete",
-            f"Found {len(keyword_hits)} matches via keyword search",
-            hits=hits_data
+            f"Found {len(keyword_hits_deduped)} matches via keyword search",
+            hits=hits_data,
+            metadata={"keywords": keywords}  # Include keywords in the step metadata
         )
 
-        # Process Keyword Hits IMMEDIATELY
-        if keyword_hits:
+        # Process Keyword Hits IMMEDIATELY (already deduped, so _process_hits_generator will just pass through)
+        if keyword_hits_deduped:
             async for event in self._process_hits_generator(
-                query, keyword_hits, step_generator, started, 
+                query, keyword_hits_deduped, step_generator, started, 
                 start_index=current_index, use_vision_for_answer=use_vision_for_answer
             ):
                 if event["type"] == "sub_answers":
@@ -365,13 +378,13 @@ class StandardPipeline:
                     total_good_answers += good_count
                     
                     # Track processed chunk IDs for semantic dedup within this execution
-                    for h in keyword_hits:
+                    for h in keyword_hits_deduped:
                         local_processed_chunk_ids.add(h.chunk_id)
                 
                 yield event
             
-            # Advance the global index counter
-            current_index += len(keyword_hits)
+            # Advance the global index counter by the ACTUAL deduped count
+            current_index += len(keyword_hits_deduped)
 
         # Check Early Stop
         if total_good_answers >= 1:
@@ -410,23 +423,33 @@ class StandardPipeline:
         combined_exclusions = local_processed_chunk_ids | all_excluded
         unique_semantic_hits = [h for h in semantic_hits if h.chunk_id not in combined_exclusions]
         
-        hits_data = [h.model_dump(by_alias=True) for h in unique_semantic_hits]
+        # Deduplicate semantic hits by page BEFORE emitting thinking_step
+        semantic_hits_deduped = self._dedupe_hits_by_page(unique_semantic_hits) if unique_semantic_hits else []
+        logger.debug(f"Semantic hits: {len(unique_semantic_hits)} -> {len(semantic_hits_deduped)} after page dedup")
+
+        # Assign global indices to deduped semantic hits BEFORE emitting thinking_step
+        for i, hit in enumerate(semantic_hits_deduped):
+            if hit.metadata is None:
+                hit.metadata = {}
+            hit.metadata["index"] = current_index + i
+
+        hits_data = [h.model_dump(by_alias=True) for h in semantic_hits_deduped]
         yield thinking_step(
             semantic_step_id, "search", "Semantic Search", "complete",
-            f"Found {len(unique_semantic_hits)} new matches via Vector Search",
+            f"Found {len(semantic_hits_deduped)} new matches via Vector Search",
             hits=hits_data
         )
 
-        if not unique_semantic_hits:
+        if not semantic_hits_deduped:
              if total_good_answers == 0:
                  yield {"type": "status", "data": "no_results"}
                  yield {"type": "done_internal", "data": "No matching files found."}
              return
 
-        # Process Semantic Hits
+        # Process Semantic Hits (already deduped)
         # Continue index from global counter
         async for event in self._process_hits_generator(
-            query, unique_semantic_hits, step_generator, started, 
+            query, semantic_hits_deduped, step_generator, started, 
             start_index=current_index, use_vision_for_answer=use_vision_for_answer
         ):
              yield event

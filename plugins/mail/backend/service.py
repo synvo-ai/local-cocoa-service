@@ -89,7 +89,7 @@ class EmailService:
     def __init__(self, storage: IndexStorage, indexer: Indexer) -> None:
         self.storage = storage
         self.indexer = indexer
-        self._root = settings.runtime_root / "mail"
+        self._root = settings.paths.runtime_root / "mail"
         self._root.mkdir(parents=True, exist_ok=True)
         self._outlook_service = OutlookService()
 

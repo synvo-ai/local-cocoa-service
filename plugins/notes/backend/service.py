@@ -25,7 +25,7 @@ class NotesService:
     def __init__(self, storage: IndexStorage, indexer: Indexer) -> None:
         self.storage = storage
         self.indexer = indexer
-        self._root = settings.runtime_root / "notes"
+        self._root = settings.paths.runtime_root / "notes"
         self._root.mkdir(parents=True, exist_ok=True)
 
     def list_notes(self) -> list[NoteSummary]:

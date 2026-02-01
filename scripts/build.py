@@ -29,7 +29,7 @@ def get_build_config(mode: BuildMode) -> Dict:
     """Get environment-specific build configuration"""
     base_config = {
         "collect_modules": [
-            "uvicorn", "fastapi", "pydantic", "starlette", "qdrant_client",
+            "uvicorn", "fastapi", "pydantic", "pydantic_settings", "starlette", "qdrant_client",
             "tiktoken", "rapidocr_onnxruntime", "onnxruntime", "langdetect",
             "certifi", "services", "magika", "markitdown", "grpcio",
             "azure", "msal", "msgraph", "debugpy", "mcp",

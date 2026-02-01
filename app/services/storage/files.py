@@ -93,6 +93,10 @@ class FileMixin:
         add_column("version", "TEXT NOT NULL DEFAULT 'fast'")
         # Memory extraction timestamp
         add_column("memory_extracted_at", "TEXT")
+        # Spatial metadata for chunk area visualization (backward compatible - nullable)
+        add_column("page_num", "INTEGER")  # Primary page number (1-indexed)
+        add_column("bbox", "TEXT")  # JSON: [x0, y0, x1, y1] normalized 0-1
+        add_column("source_regions", "TEXT")  # JSON array of SourceRegion objects
 
     # --- Folders ---
 
@@ -573,12 +577,16 @@ class FileMixin:
         return [self._row_to_file(row) for row in rows]
 
     def list_error_files(self, folder_id: Optional[str] = None) -> list[FileRecord]:
-        query = "SELECT * FROM files WHERE index_status = 'error'"
+        # Query files that failed at any stage:
+        # - index_status = 'error' (legacy error status)
+        # - fast_stage = -1 (failed during fast text indexing)
+        # - deep_stage = -1 (failed during deep/vision indexing)
+        query = "SELECT * FROM files WHERE (index_status = 'error' OR fast_stage = -1 OR deep_stage = -1)"
         params: list[object] = []
         if folder_id:
             query += " AND folder_id = ?"
             params.append(folder_id)
-        query += " ORDER BY error_at DESC"
+        query += " ORDER BY error_at DESC, modified_at DESC"
         
         with self.connect() as conn:  # type: ignore
             rows = conn.execute(query, params).fetchall()
@@ -589,6 +597,7 @@ class FileMixin:
     def list_files_by_stage(
         self,
         fast_stage: Optional[int] = None,
+        fast_stage_gte: Optional[int] = None,
         deep_stage: Optional[int] = None,
         limit: int = 100,
         folder_id: Optional[str] = None,
@@ -597,6 +606,7 @@ class FileMixin:
         
         Args:
             fast_stage: Filter by fast_stage value (0=pending, 1=text_done, 2=embed_done, -1=error)
+            fast_stage_gte: Filter by fast_stage >= value (for Deep which only needs Fast Text done)
             deep_stage: Filter by deep_stage value (0=pending, 1=text_done, 2=embed_done, -1=error, -2=skipped)
             limit: Maximum number of files to return
             folder_id: Optional folder filter
@@ -607,6 +617,9 @@ class FileMixin:
         if fast_stage is not None:
             conditions.append("fast_stage = ?")
             params.append(fast_stage)
+        if fast_stage_gte is not None:
+            conditions.append("fast_stage >= ?")
+            params.append(fast_stage_gte)
         if deep_stage is not None:
             conditions.append("deep_stage = ?")
             params.append(deep_stage)
@@ -652,6 +665,40 @@ class FileMixin:
             result["total"] = conn.execute(query, params).fetchone()[0]
             
         return result
+
+    def list_files_needing_summary(
+        self,
+        folder_id: Optional[str] = None,
+        limit: int = 50,
+    ) -> list[FileRecord]:
+        """Query files that have completed fast_text, have chunks, but don't have a summary.
+        
+        Args:
+            folder_id: Optional folder filter
+            limit: Maximum number of files to return
+            
+        Returns:
+            List of FileRecord objects needing summary generation
+        """
+        # Only return files that have chunks (inner join ensures this)
+        base_query = """
+            SELECT DISTINCT f.* FROM files f
+            INNER JOIN chunks c ON c.file_id = f.id
+            WHERE f.fast_stage >= 1
+            AND (f.summary IS NULL OR f.summary = '')
+        """
+        params: list[object] = []
+        
+        if folder_id:
+            base_query += " AND f.folder_id = ?"
+            params.append(folder_id)
+        
+        base_query += " ORDER BY f.modified_at DESC LIMIT ?"
+        params.append(limit)
+        
+        with self.connect() as conn:  # type: ignore
+            rows = conn.execute(base_query, params).fetchall()
+        return [self._row_to_file(row) for row in rows]
 
     def update_file_stage(
         self,
@@ -722,6 +769,7 @@ class FileMixin:
             updates.append("fast_stage = 0")
             updates.append("fast_text_at = NULL")
             updates.append("fast_embed_at = NULL")
+            updates.append("summary = NULL")  # Clear summary for LLM regeneration
             versions_to_delete.append("fast")
         if reset_deep:
             updates.append("deep_stage = 0")
@@ -822,11 +870,11 @@ class FileMixin:
 
     def replace_chunks(self, file_id: str, chunks: list[ChunkSnapshot], version: str = "fast") -> None:
         """Replace all chunks for a file with new chunks.
-        
+
         Args:
             file_id: The file ID to replace chunks for
             chunks: List of new chunks
-            version: Only delete chunks of this version ("fast" or "deep"). 
+            version: Only delete chunks of this version ("fast" or "deep").
                      If None, deletes all chunks for the file.
         """
         with self.connect() as conn:  # type: ignore
@@ -836,8 +884,8 @@ class FileMixin:
                 return
             conn.executemany(
                 """
-                INSERT INTO chunks (id, file_id, ordinal, text, snippet, token_count, char_count, section_path, metadata, created_at, version, privacy_level, memory_extracted_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chunks (id, file_id, ordinal, text, snippet, token_count, char_count, section_path, metadata, created_at, version, privacy_level, memory_extracted_at, page_num, bbox, source_regions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -854,6 +902,9 @@ class FileMixin:
                         chunk.version,
                         chunk.privacy_level,
                         chunk.memory_extracted_at.isoformat() if chunk.memory_extracted_at else None,
+                        chunk.page_num,
+                        json.dumps(chunk.bbox) if chunk.bbox else None,
+                        json.dumps([r.model_dump() for r in chunk.source_regions]) if chunk.source_regions else None,
                     )
                     for chunk in chunks
                 ],
@@ -999,13 +1050,32 @@ class FileMixin:
 
     @staticmethod
     def _row_to_chunk(row: sqlite3.Row) -> ChunkSnapshot:
+        from core.models import SourceRegion
+
         keys = row.keys()
         version = row["version"] if "version" in keys and row["version"] else "fast"
         privacy_level = row["privacy_level"] if "privacy_level" in keys and row["privacy_level"] else "normal"
         memory_extracted_at = None
         if "memory_extracted_at" in keys and row["memory_extracted_at"]:
             memory_extracted_at = dt.datetime.fromisoformat(row["memory_extracted_at"])
-        
+
+        # Spatial metadata (backward compatible - may be None)
+        page_num = row["page_num"] if "page_num" in keys and row["page_num"] is not None else None
+        bbox = None
+        if "bbox" in keys and row["bbox"]:
+            try:
+                bbox = json.loads(row["bbox"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        source_regions = None
+        if "source_regions" in keys and row["source_regions"]:
+            try:
+                regions_data = json.loads(row["source_regions"])
+                if isinstance(regions_data, list):
+                    source_regions = [SourceRegion(**r) for r in regions_data]
+            except (json.JSONDecodeError, TypeError):
+                pass
+
         return ChunkSnapshot(
             chunk_id=row["id"],
             file_id=row["file_id"],
@@ -1020,6 +1090,9 @@ class FileMixin:
             version=version,
             privacy_level=privacy_level,
             memory_extracted_at=memory_extracted_at,
+            page_num=page_num,
+            bbox=bbox,
+            source_regions=source_regions,
         )
 
     @staticmethod

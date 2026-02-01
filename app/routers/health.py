@@ -8,6 +8,7 @@ from fastapi import APIRouter
 from core.config import settings
 from core.context import get_indexer, get_storage
 from core.models import HealthResponse, ServiceStatus
+from core.model_manager import ModelType, ModelState
 
 router = APIRouter(tags=["health"])
 
@@ -81,8 +82,8 @@ async def read_health() -> HealthResponse:
         check_service("Reranker", settings.endpoints.rerank_url),
     ]
     if settings.endpoints.vision_url:
-        check_service("Vision/LLM", settings.endpoints.vision_url)
-    
+        checks.append(check_service("Vision/LLM", settings.endpoints.vision_url))
+
     # Optional services (Whisper is optional - only check if explicitly enabled)
     # Whisper being offline should not cause degraded status for file management
     optional_checks = []
@@ -91,16 +92,20 @@ async def read_health() -> HealthResponse:
 
     # Gather core service statuses
     core_services = await asyncio.gather(*checks)
-    
+
     # Gather optional service statuses separately
     optional_services = await asyncio.gather(*optional_checks) if optional_checks else []
-    
+
     # Combine all services for reporting
     all_services = list(core_services) + list(optional_services)
 
-    # Downgrade status only if CORE services are offline
-    # Optional services (like Whisper) being offline should not affect overall status
-    if any(s.status == "offline" for s in core_services):
+    # Check if model manager is enabled (hibernation mode)
+    # If enabled, services being "offline" is expected - they start on-demand
+    model_manager_enabled = settings.model_manager.enabled
+
+    # Downgrade status only if CORE services are offline AND model manager is disabled
+    # When model manager is enabled, "offline" llama.cpp servers are normal (hibernated)
+    if not model_manager_enabled and any(s.status == "offline" for s in core_services):
         status = "degraded"
         if not message:
             message = "Some AI services are offline."

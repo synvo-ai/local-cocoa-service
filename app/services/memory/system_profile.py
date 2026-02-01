@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 def _get_profile_path(user_id: str) -> Path:
     """Get the file path for storing a user's basic profile."""
-    profile_dir = settings.runtime_root / "profiles"
+    profile_dir = settings.base_dir / "profiles"
     profile_dir.mkdir(parents=True, exist_ok=True)
     return profile_dir / f"basic_profile_{user_id}.json"
 

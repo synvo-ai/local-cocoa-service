@@ -98,18 +98,131 @@ class VisionAnswerComponent:
             page = doc.load_page(page_index)
 
             # Render with zoom for better quality
-            zoom = 2.0
+            # For financial reports with tables, we need higher resolution
+            # zoom=2.0 is 144 DPI, zoom=2.5 is 180 DPI
+            target_zoom = 2.5
+            min_zoom = 1.5  # Minimum ~108 DPI for readable tables
             max_pixels = settings.vision_max_pixels
 
             if max_pixels > 0:
                 rect = page.rect
-                if (rect.width * zoom) * (rect.height * zoom) > max_pixels:
-                    zoom = (max_pixels / (rect.width * rect.height)) ** 0.5
+                if (rect.width * target_zoom) * (rect.height * target_zoom) > max_pixels:
+                    zoom = max((max_pixels / (rect.width * rect.height)) ** 0.5, min_zoom)
+                else:
+                    zoom = target_zoom
+            else:
+                zoom = target_zoom
 
             pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
             img_bytes = pix.tobytes("png")
 
             doc.close()
+            return img_bytes
+
+        except Exception as e:
+            logger.error(f"Failed to render PDF page {page_num} from {pdf_path}: {e}")
+            return None
+
+    def _calculate_max_image_pixels(self) -> int:
+        """
+        Calculate maximum image pixels based on context length budget.
+        
+        Formula: pixels ≈ tokens * 400 (Qwen VL uses ~1 token per 400 pixels)
+        
+        Context budget:
+        - Total context: llm_context_tokens (e.g., 32768)
+        - Reserved for prompt: ~500 tokens
+        - Reserved for output: ~2000 tokens
+        - Available for image: rest
+        """
+        context_tokens = settings.llm_context_tokens
+        reserved_tokens = 2500  # prompt (~500) + output (~2000)
+        available_image_tokens = context_tokens - reserved_tokens
+        
+        # Each token ≈ 400 pixels for Qwen VL
+        pixels_from_context = available_image_tokens * 400
+        
+        # Also respect the explicit vision_max_pixels setting
+        user_max_pixels = settings.vision_max_pixels
+        
+        # Use the smaller of the two limits
+        if user_max_pixels > 0:
+            max_pixels = min(pixels_from_context, user_max_pixels)
+        else:
+            max_pixels = pixels_from_context
+        
+        logger.debug(f"Image budget: context={context_tokens}, available_tokens={available_image_tokens}, max_pixels={max_pixels}")
+        return max_pixels
+
+    def _render_pdf_page_adaptive(self, pdf_path: Path, page_num: int) -> Optional[bytes]:
+        """
+        Render a PDF page with adaptive resolution based on:
+        1. Page dimensions (wide pages get higher priority)
+        2. Context length budget (don't exceed token limit)
+        
+        Args:
+            pdf_path: Path to the PDF file
+            page_num: 1-indexed page number
+            
+        Returns:
+            PNG image bytes, or None if rendering fails
+        """
+        if not fitz:
+            logger.warning("PyMuPDF (fitz) not available, cannot render PDF pages")
+            return None
+
+        if not pdf_path.exists():
+            logger.warning(f"PDF file not found: {pdf_path}")
+            return None
+
+        try:
+            doc = fitz.open(str(pdf_path))
+
+            page_index = page_num - 1
+            if page_index < 0 or page_index >= len(doc):
+                logger.warning(f"Page {page_num} out of range for {pdf_path}")
+                doc.close()
+                return None
+
+            page = doc.load_page(page_index)
+            rect = page.rect
+            page_pixels = rect.width * rect.height
+            
+            # Calculate max pixels from context budget
+            max_pixels = self._calculate_max_image_pixels()
+            
+            # Check if page is wide (landscape or two-column spread)
+            is_wide = rect.width > rect.height * 1.2
+            
+            # For wide pages, we want higher resolution to read dense tables
+            # But we must respect the context budget
+            if is_wide:
+                target_zoom = 3.0  # Higher zoom for wide pages (~216 DPI)
+                min_zoom = 2.0    # Minimum ~144 DPI for readable tables
+                logger.info(f"Page {page_num} is wide ({rect.width:.0f}x{rect.height:.0f})")
+            else:
+                target_zoom = 2.5  # Normal zoom for portrait pages (~180 DPI)
+                min_zoom = 1.5    # Minimum ~108 DPI
+            
+            # Calculate actual zoom based on pixel budget
+            target_pixels = page_pixels * (target_zoom ** 2)
+            
+            if target_pixels > max_pixels:
+                # Scale down to fit budget, but respect minimum zoom
+                budget_zoom = (max_pixels / page_pixels) ** 0.5
+                zoom = max(budget_zoom, min_zoom)
+                logger.info(f"Page {page_num}: target_zoom={target_zoom:.1f} exceeds budget, using zoom={zoom:.2f}")
+            else:
+                zoom = target_zoom
+
+            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            img_bytes = pix.tobytes("png")
+            
+            actual_pixels = pix.width * pix.height
+            estimated_tokens = actual_pixels // 400
+
+            doc.close()
+            logger.info(f"Rendered page {page_num}: zoom={zoom:.2f}, {pix.width}x{pix.height}={actual_pixels} pixels, ~{estimated_tokens} tokens")
             return img_bytes
 
         except Exception as e:
@@ -176,10 +289,10 @@ class VisionAnswerComponent:
             return await self._fallback_text_answer(query, context_part, file_name, file_summary)
 
         # Render the first page (most relevant)
-        # Could be extended to handle multiple pages if needed
+        # Use adaptive rendering for better quality on wide/landscape pages
         page_num = page_numbers[0]
         logger.info(f"[VISION DEBUG] Rendering page {page_num} from {file_path}")
-        page_image = self._render_pdf_page(file_path, page_num)
+        page_image = self._render_pdf_page_adaptive(file_path, page_num)
 
         if page_image is None:
             logger.info(f"[VISION DEBUG] Failed to render page {page_num}, falling back to text")
@@ -201,6 +314,8 @@ class VisionAnswerComponent:
             system_prompt = (
                 "You are a precise, fact-based assistant analyzing a document page.\n"
                 "Answer the question based ONLY on what you can see in this page image.\n"
+                "IMPORTANT: For tables, pay close attention to the units shown in headers or column titles "
+                "(e.g., $'000, millions, %, etc.). Always include the correct unit in your answer.\n"
                 "If the page does NOT contain information to answer the question, reply exactly: NO_ANSWER\n"
                 "Do not make up or infer information that is not visible on the page.\n"
                 "Keep your answer concise (1-2 sentences)."
@@ -300,10 +415,10 @@ class VisionAnswerComponent:
         This uses the same logic as VerificationComponent.process_single_chunk.
         """
         system_prompt = (
-            "You are a fact-based and objective assistant that provides complete answers.\n"
-            "Answer the question based on the given context in 1-2 complete sentences.\n"
-            "If the context does NOT directly answer the question, reply exactly: NO_ANSWER\n"
-            "Do not make up connections or assumptions."
+            "You are a helpful assistant that extracts relevant information.\n"
+            "Based on the context, answer the question in 1-2 sentences.\n"
+            "If the context contains ANY related or partially relevant information, summarize what you found.\n"
+            "Only reply NO_ANSWER if the context is completely unrelated to the question."
         )
 
         content = context_part.get("content", "")
@@ -491,4 +606,3 @@ class VisionAnswerComponent:
             logger.info(f"[VISION DEDUP] Deduplicated {dedup_count} chunks from {len(context_parts)} total (saved {dedup_count} VLM calls)")
 
         return results
-

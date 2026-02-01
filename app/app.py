@@ -10,18 +10,23 @@ from services.drive import folders_router as folders
 from services.indexer import router as index
 from services.search import router as search
 from services.memory import router as memory
-from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, spawns as spawns_router
+from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router
 
-from core.context import get_indexer
+from core.context import get_indexer, get_storage
 from core.config import settings
+from core.models import FolderRecord
 from core.auth import verify_api_key, ensure_local_key
+from core.model_manager import get_model_manager
 
 # Plugin system
 from plugins import init_all_plugins
 
 import asyncio
 import logging
+import hashlib
 import datetime as dt
+from pathlib import Path
+import sys
 
 # Force ProactorEventLoop on Windows to avoid "too many file descriptors" error
 if sys.platform == 'win32':
@@ -56,7 +61,7 @@ app.include_router(security.router)
 app.include_router(plugins_router.router)
 app.include_router(language_router.router)
 app.include_router(events_router.router)
-app.include_router(spawns_router.router)
+app.include_router(models_router.router)
 
 _poll_task: asyncio.Task | None = None
 _startup_refresh_task: asyncio.Task | None = None
@@ -88,9 +93,14 @@ async def _poll_loop(interval: int) -> None:
     while True:
         await asyncio.sleep(interval)
 
-        # Skip if already running to avoid conflicts
+        # Skip if already running or lock is held (legacy API might be running)
         if indexer.status().status == "running":
             logger.debug("Poll loop: indexer already running, skipping")
+            continue
+        
+        # Also check if the lock is held - legacy refresh() might be running
+        if indexer.state.lock.locked():
+            logger.debug("Poll loop: indexer lock held (legacy task running), skipping")
             continue
 
         # Use staged indexing which handles file discovery and processing
@@ -136,7 +146,7 @@ async def on_startup() -> None:
     init_all_plugins(app)
 
     # Ensure local-key exists and is written to file for frontend
-    ensure_local_key(settings.runtime_root)
+    ensure_local_key(settings.paths.runtime_root)
 
     indexer = get_indexer()
     if settings.refresh_on_startup:
@@ -154,19 +164,19 @@ async def on_startup() -> None:
     _staged_scheduler_task = asyncio.create_task(_staged_scheduler_loop(10))
     _track_task(_staged_scheduler_task, "staged-scheduler")
 
-    # Start managed model spawns (VLM, Embedding, etc.)
-    from core.spawn_manager import get_spawn_manager
-    manager = get_spawn_manager()
-    asyncio.create_task(manager.start_all_spawns())
+    # Start managed models (VLM, Embedding, etc.)
+    from core.model_manager import get_model_manager
+    manager = get_model_manager()
+    asyncio.create_task(manager.start_all_models())
 
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
-    # Stop managed model spawns
-    from core.spawn_manager import get_spawn_manager
-    manager = get_spawn_manager()
-    await manager.stop_all()
+    # Stop managed models
+    from core.model_manager import get_model_manager
+    manager = get_model_manager()
+    await manager.stop_all_models()
 
     if _poll_task:
         _poll_task.cancel()
@@ -200,3 +210,9 @@ async def on_shutdown() -> None:
             # Expected when cancelling task on shutdown - safe to ignore
             pass
         _staged_scheduler_task = None
+    
+    # Stop all model processes (llama-server instances)
+    try:
+        get_model_manager().stop_all_models()
+    except Exception as e:
+        logger.error(f"Error stopping model processes: {e}")

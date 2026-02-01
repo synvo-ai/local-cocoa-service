@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 import math
@@ -12,9 +13,30 @@ import httpx
 from PIL import Image
 
 from core.config import settings
+from core.model_manager import get_model_manager, ModelType
 
 
 logger = logging.getLogger(__name__)
+
+# Retry settings for 503 errors (model warming up after hibernation)
+_503_MAX_RETRIES = 5
+_503_INITIAL_DELAY = 0.5
+_503_BACKOFF_MULTIPLIER = 1.5
+_503_MAX_DELAY = 3.0
+
+
+async def _should_retry_503(exc: Exception, attempt: int) -> float | None:
+    """
+    Check if we should retry a 503 error and return the delay.
+    Returns None if we should not retry, otherwise returns the delay in seconds.
+    """
+    if attempt >= _503_MAX_RETRIES:
+        return None
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 503:
+        delay = min(_503_INITIAL_DELAY * (_503_BACKOFF_MULTIPLIER ** attempt), _503_MAX_DELAY)
+        logger.info(f"Got 503 (model warming up), retrying in {delay:.1f}s (attempt {attempt + 1}/{_503_MAX_RETRIES})")
+        return delay
+    return None
 
 
 def _has_repeated_ngram(text: str, n: int = 6) -> bool:
@@ -47,6 +69,10 @@ class EmbeddingClient:
     async def encode(self, texts: Sequence[str]) -> list[list[float]]:
         if not texts:
             return []
+
+        # Ensure embedding model is running
+        await get_model_manager().ensure_model(ModelType.EMBEDDING)
+
         base = settings.endpoints.embedding_url.rstrip("/")
         endpoints: list[str] = []
 
@@ -58,40 +84,54 @@ class EmbeddingClient:
         errors: list[str] = []
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
-                try:
-                    if endpoint.endswith("/v1/embeddings"):
-                        payload: dict[str, Any] = {"input": texts}
-                        model = os.getenv("LOCAL_EMBEDDING_MODEL")
-                        if model:
-                            payload["model"] = model
-                    else:
-                        payload = {"texts": texts}
+                if endpoint.endswith("/v1/embeddings"):
+                    payload: dict[str, Any] = {"input": texts}
+                    model = os.getenv("LOCAL_EMBEDDING_MODEL")
+                    if model:
+                        payload["model"] = model
+                else:
+                    payload = {"texts": texts}
 
-                    response = await client.post(endpoint, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        response = await client.post(endpoint, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
 
-                    if "embedding" in data and isinstance(data["embedding"], list):
-                        vector = [float(value) for value in data["embedding"]]
-                        return [vector]
+                        if "embedding" in data and isinstance(data["embedding"], list):
+                            vector = [float(value) for value in data["embedding"]]
+                            return [vector]
 
-                    if "embeddings" in data and isinstance(data["embeddings"], list):
-                        return [list(map(float, vector)) for vector in data["embeddings"]]
+                        if "embeddings" in data and isinstance(data["embeddings"], list):
+                            return [list(map(float, vector)) for vector in data["embeddings"]]
 
-                    if "data" in data and isinstance(data["data"], list):
-                        vectors: list[list[float]] = []
-                        for item in data["data"]:
-                            embedding = item.get("embedding")
-                            if embedding is None:
-                                continue
-                            vectors.append([float(value) for value in embedding])
-                        if vectors:
-                            return vectors
+                        if "data" in data and isinstance(data["data"], list):
+                            vectors: list[list[float]] = []
+                            for item in data["data"]:
+                                embedding = item.get("embedding")
+                                if embedding is None:
+                                    continue
+                                vectors.append([float(value) for value in embedding])
+                            if vectors:
+                                return vectors
 
-                    raise ValueError("Unexpected embedding response schema")
-                except (httpx.HTTPError, ValueError) as exc:
-                    errors.append(f"{endpoint}: {exc}")
+                        raise ValueError("Unexpected embedding response schema")
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        if exc.response.status_code == 500:
+                            logger.warning("Embedding endpoint %s returned 500. Restarting model...", endpoint)
+                            get_model_manager().stop_model(ModelType.EMBEDDING)
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                else:
                     continue
+                break
 
         raise RuntimeError("Failed to obtain embeddings from configured endpoint(s): " + "; ".join(errors))
 
@@ -102,6 +142,10 @@ class RerankClient:
     async def rerank(self, query: str, documents: Sequence[str], top_k: int = 5) -> list[tuple[int, float]]:
         if not documents:
             return []
+
+        # Ensure rerank model is running
+        await get_model_manager().ensure_model(ModelType.RERANK)
+
         payload = {"query": query, "documents": list(documents), "top_k": top_k}
 
         base = settings.endpoints.rerank_url.rstrip("/")
@@ -117,16 +161,31 @@ class RerankClient:
         data: dict[str, Any] = {}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in candidates:
-                try:
-                    response = await client.post(endpoint, json=payload)
-                    logger.debug("Rerank response from %s: %s", endpoint, response.text)
-                    response.raise_for_status()
-                    data = response.json()
-                    break
-                except (httpx.HTTPError, ValueError) as exc:
-                    logger.warning("Rerank endpoint %s failed: %s", endpoint, exc)
-                    errors.append(f"{endpoint}: {exc}")
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        response = await client.post(endpoint, json=payload)
+                        logger.debug("Rerank response from %s: %s", endpoint, response.text)
+                        response.raise_for_status()
+                        data = response.json()
+                        break
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        if exc.response.status_code == 500:
+                            logger.warning("Rerank endpoint %s returned 500. Restarting model...", endpoint)
+                            get_model_manager().stop_model(ModelType.RERANK)
+                        logger.warning("Rerank endpoint %s failed: %s", endpoint, exc)
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning("Rerank endpoint %s failed: %s", endpoint, exc)
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                else:
                     continue
+                break
             else:
                 logger.error("Failed to obtain rerank results: %s", "; ".join(errors))
                 raise RuntimeError("Failed to obtain rerank results: " + "; ".join(errors))
@@ -164,34 +223,14 @@ class LlmClient:
 
     async def health_check(self) -> bool:
         """
-        Quick health check to verify LLM service is available.
-        Returns True if service is responsive, False otherwise.
+        Ensure LLM model is running and ready.
+        Returns True if model started successfully, False otherwise.
         """
-        base = settings.endpoints.llm_url.rstrip("/")
-        health_endpoints = [
-            f"{base}/health",
-            f"{base}/v1/models",
-            base,  # Some servers respond to root
-        ]
-
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            for endpoint in health_endpoints:
-                try:
-                    response = await client.get(endpoint)
-                    if response.status_code < 500:
-                        return True
-                except httpx.RequestError:
-                    continue
-
-        # If no health endpoint works, try a minimal completion
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    f"{base}/v1/chat/completions",
-                    json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1}
-                )
-                return response.status_code < 500
-        except httpx.RequestError:
+            await get_model_manager().ensure_model(ModelType.VISION)
+            return True
+        except Exception as exc:
+            logger.warning(f"LLM health check failed: {exc}")
             return False
 
     async def complete(
@@ -206,6 +245,9 @@ class LlmClient:
         presence_penalty: float | None = None,
         repeat_last_n: int | None = None,
     ) -> str:
+        # Ensure LLM/Vision model is running
+        await get_model_manager().ensure_model(ModelType.VISION)
+
         processed_system = self._truncate_system(system)
         prompt_budget = self._prompt_budget(processed_system)
         processed_prompt = self._truncate_text(prompt, prompt_budget)
@@ -238,31 +280,42 @@ class LlmClient:
         logger.debug(f"🔧 LLM Request payload: {payload}")
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
-                try:
-                    logger.info(f"📡 Calling LLM endpoint: {endpoint}")
-                    response = await client.post(endpoint, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                    logger.info(f"📥 LLM Response data keys: {list(data.keys())}")
-                    text = data.get("text")
-                    if text is None and "content" in data:
-                        text = data["content"]
-                    if text is None and "choices" in data and len(data["choices"]) > 0:
-                        text = data["choices"][0].get("text")
-                    if text is not None:
-                        logger.info(f"✅ LLM returned text length: {len(text)} chars")
-                        return str(text)
-                    raise ValueError("Unexpected LLM response schema")
-                except (httpx.HTTPError, ValueError) as exc:
-                    error_details = ""
-                    if isinstance(exc, httpx.HTTPStatusError):
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        logger.info(f"📡 Calling LLM endpoint: {endpoint}")
+                        response = await client.post(endpoint, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+                        logger.info(f"📥 LLM Response data keys: {list(data.keys())}")
+                        text = data.get("text")
+                        if text is None and "content" in data:
+                            text = data["content"]
+                        if text is None and "choices" in data and len(data["choices"]) > 0:
+                            text = data["choices"][0].get("text")
+                        if text is not None:
+                            logger.info(f"✅ LLM returned text length: {len(text)} chars")
+                            return str(text)
+                        raise ValueError("Unexpected LLM response schema")
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        error_details = ""
                         try:
                             error_details = f" Response: {exc.response.text}"
                         except Exception:
                             pass
-                    logger.warning(f"❌ LLM endpoint {endpoint} failed: {type(exc).__name__}: {exc}{error_details}")
-                    errors.append(f"{endpoint}: {type(exc).__name__}: {exc}{error_details}")
+                        logger.warning(f"❌ LLM endpoint {endpoint} failed: {type(exc).__name__}: {exc}{error_details}")
+                        errors.append(f"{endpoint}: {type(exc).__name__}: {exc}{error_details}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning(f"❌ LLM endpoint {endpoint} failed: {type(exc).__name__}: {exc}")
+                        errors.append(f"{endpoint}: {type(exc).__name__}: {exc}")
+                        break
+                else:
                     continue
+                break
 
         raise RuntimeError("Failed to obtain completion from configured LLM endpoint(s): " + "; ".join(errors))
 
@@ -304,6 +357,9 @@ class LlmClient:
         return max(math.ceil(len(text) / ratio), 1)
 
     async def chat(self, messages: list[dict[str, Any]], *, stream: bool = False) -> dict[str, Any]:
+        # Ensure LLM/Vision model is running
+        await get_model_manager().ensure_model(ModelType.VISION)
+
         payload = {"messages": messages, "stream": stream}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.post(f"{settings.endpoints.llm_url}/chat", json=payload)
@@ -322,6 +378,9 @@ class LlmClient:
         repeat_last_n: int | None = None,
     ) -> str:
         """Use chat completion API for better VLM responses."""
+        # Ensure LLM/Vision model is running
+        await get_model_manager().ensure_model(ModelType.VISION)
+
         payload: dict[str, Any] = {
             "messages": messages,
             "max_tokens": max_tokens,
@@ -350,30 +409,42 @@ class LlmClient:
         logger.debug(f"🔧 Chat Request payload: {payload}")
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
-                try:
-                    logger.info(f"📡 Calling Chat endpoint: {endpoint}")
-                    response = await client.post(endpoint, json=payload)
-                    response.raise_for_status()
-                    data = response.json()
-                    logger.info(f"📥 Chat Response data keys: {list(data.keys())}")
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        logger.info(f"📡 Calling Chat endpoint: {endpoint}")
+                        response = await client.post(endpoint, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+                        logger.info(f"📥 Chat Response data keys: {list(data.keys())}")
 
-                    # OpenAI-style response
-                    if "choices" in data and len(data["choices"]) > 0:
-                        content = data["choices"][0].get("message", {}).get("content", "")
-                        if content:
-                            logger.info(f"✅ Chat returned text length: {len(content)} chars")
-                            return str(content)
+                        # OpenAI-style response
+                        if "choices" in data and len(data["choices"]) > 0:
+                            content = data["choices"][0].get("message", {}).get("content", "")
+                            if content:
+                                logger.info(f"✅ Chat returned text length: {len(content)} chars")
+                                return str(content)
 
-                    # llama.cpp style response
-                    if "content" in data:
-                        logger.info(f"✅ Chat returned text length: {len(data['content'])} chars")
-                        return str(data["content"])
+                        # llama.cpp style response
+                        if "content" in data:
+                            logger.info(f"✅ Chat returned text length: {len(data['content'])} chars")
+                            return str(data["content"])
 
-                    raise ValueError("Unexpected chat response schema")
-                except (httpx.HTTPError, ValueError) as exc:
-                    logger.warning(f"❌ Chat endpoint {endpoint} failed: {exc}")
-                    errors.append(f"{endpoint}: {exc}")
+                        raise ValueError("Unexpected chat response schema")
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(f"❌ Chat endpoint {endpoint} failed: {exc}")
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning(f"❌ Chat endpoint {endpoint} failed: {exc}")
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                else:
                     continue
+                break
 
         raise RuntimeError("Failed to obtain chat completion from configured LLM endpoint(s): " + "; ".join(errors))
 
@@ -388,6 +459,9 @@ class LlmClient:
     ) -> str:
         if settings.endpoints.vision_url is None:
             raise RuntimeError("Vision endpoint is not configured.")
+
+        # Ensure LLM/Vision model is running
+        await get_model_manager().ensure_model(ModelType.VISION)
 
         # Convert frames to data URLs for llama.cpp
         images_content = []
@@ -419,27 +493,45 @@ class LlmClient:
 
         logger.info(f"🔧 Vision describe_frames request: max_tokens={max_tokens}")
 
-        # Apply 6-gram blocking with up to 3 attempts.
+        # Apply 6-gram blocking with up to 2 attempts, plus 503 retry for model warmup.
+        # Reduced timeout from 60s to 30s for faster failure detection.
         last_text = ""
         last_error: str | None = None
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for attempt in range(3):
-                try:
-                    response = await client.post(
-                        f"{settings.endpoints.vision_url}/v1/chat/completions",
-                        json=payload,
-                    )
-                    response.raise_for_status()
-                    data = response.json()
-                except httpx.HTTPStatusError as exc:
-                    body = (exc.response.text or "").strip()
-                    body_preview = body[:500]
-                    last_error = f"HTTP {exc.response.status_code} from vision endpoint: {body_preview}" if body_preview else f"HTTP {exc.response.status_code} from vision endpoint"
-                    logger.warning("Vision describe_frames failed (attempt %d/3): %s", attempt + 1, last_error)
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for attempt in range(2):
+                # Inner retry loop for 503 errors
+                data: dict[str, Any] | None = None
+                request_succeeded = False
+                for retry_503 in range(_503_MAX_RETRIES + 1):
+                    try:
+                        response = await client.post(
+                            f"{settings.endpoints.vision}/v1/chat/completions",
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                        request_succeeded = True
+                        break  # Success, exit 503 retry loop
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, retry_503)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        body = (exc.response.text or "").strip()
+                        body_preview = body[:500]
+                        last_error = f"HTTP {exc.response.status_code} from vision endpoint: {body_preview}" if body_preview else f"HTTP {exc.response.status_code} from vision endpoint"
+                        logger.warning("Vision describe_frames failed (attempt %d/2): %s", attempt + 1, last_error)
+                        break  # Non-503 error, exit retry loop
+                    except (httpx.RequestError, ValueError, json.JSONDecodeError) as exc:
+                        last_error = f"Vision describe_frames request failed (attempt {attempt + 1}/2): {type(exc).__name__}: {exc}"
+                        logger.warning("%s", last_error)
+                        break  # Exit 503 retry loop on non-retryable error
+                else:
+                    # 503 retry loop exhausted without success
                     continue
-                except (httpx.RequestError, ValueError, json.JSONDecodeError) as exc:
-                    last_error = f"Vision describe_frames request failed (attempt {attempt + 1}/3): {type(exc).__name__}: {exc}"
-                    logger.warning("%s", last_error)
+
+                # Skip data extraction if request failed
+                if not request_succeeded or data is None:
                     continue
 
                 # Extract text from OpenAI-style response
@@ -452,7 +544,7 @@ class LlmClient:
                     return text
 
                 logger.info(
-                    "6-gram blocking triggered for vision describe_frames (attempt %d/3).",
+                    "6-gram blocking triggered for vision describe_frames (attempt %d/2).",
                     attempt + 1,
                 )
 
@@ -724,6 +816,9 @@ class LlmClient:
         This applies the model's chat template for better response quality
         compared to raw text completion.
         """
+        # Ensure LLM/Vision model is running before streaming
+        await get_model_manager().ensure_model(ModelType.VISION)
+
         payload: dict[str, Any] = {
             "messages": messages,
             "max_tokens": min(max_tokens, settings.llm_context_tokens),
@@ -748,35 +843,41 @@ class LlmClient:
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
-                try:
-                    logger.info(f"📡 Streaming from Chat endpoint: {endpoint}")
-                    async with client.stream("POST", endpoint, json=payload) as response:
-                        response.raise_for_status()
-                        async for line in response.aiter_lines():
-                            if not line.strip():
-                                continue
-                            if line.startswith("data: "):
-                                data_str = line[6:]
-                                if data_str.strip() == "[DONE]":
-                                    break
-                                try:
-                                    data = json.loads(data_str)
-                                    # OpenAI-style streaming response
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        logger.info(f"📡 Streaming from Chat endpoint: {endpoint} (attempt {attempt + 1}/{_503_MAX_RETRIES + 1})")
+                        async with client.stream("POST", endpoint, json=payload) as response:
+                            response.raise_for_status()
+                            async for line in response.aiter_lines():
+                                if not line.strip():
+                                    continue
+                                if line.startswith("data: "):
+                                    data_str = line[6:]
+                                    if data_str.strip() == "[DONE]":
+                                        break
+                                    try:
+                                        data = json.loads(data_str)
+                                    except json.JSONDecodeError:
+                                        continue
+
                                     if "choices" in data and len(data["choices"]) > 0:
                                         delta = data["choices"][0].get("delta", {})
                                         content = delta.get("content")
                                         if content:
                                             yield content
-                                    # llama.cpp style streaming response
-                                    elif "content" in data:
-                                        if data["content"]:
-                                            yield data["content"]
-                                except json.JSONDecodeError:
-                                    continue
-                    return
-                except (httpx.HTTPError, ValueError) as exc:
-                    logger.warning(f"❌ Stream chat failed for endpoint {endpoint}: {exc}")
-                    continue
+                                    elif "content" in data and data["content"]:
+                                        yield data["content"]
+                        return
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        logger.warning(f"❌ Stream chat failed for endpoint {endpoint}: {exc}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning(f"❌ Stream chat failed for endpoint {endpoint}: {exc}")
+                        break
 
             raise RuntimeError("Failed to stream chat completion from configured LLM endpoint(s)")
 
@@ -787,6 +888,9 @@ class TranscriptionClient:
     async def transcribe(self, audio_bytes: bytes, *, language: str = "en", response_format: str = "json") -> str | dict:
         if settings.endpoints.transcribe_url is None:
             raise RuntimeError("Transcription endpoint is not configured.")
+
+        # Ensure whisper model is running
+        await get_model_manager().ensure_model(ModelType.WHISPER)
 
         endpoint = f"{settings.endpoints.transcribe_url.rstrip('/')}/inference"
 
@@ -800,13 +904,23 @@ class TranscriptionClient:
             "translate": "false",  # Keep original language, don't translate to English
         }
 
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(endpoint, files=files, data=data)
-            response.raise_for_status()
+        for attempt in range(_503_MAX_RETRIES + 1):
+            try:
+                async with httpx.AsyncClient(timeout=self.timeout) as client:
+                    response = await client.post(endpoint, files=files, data=data)
+                    response.raise_for_status()
 
-            if response_format == "json":
-                return response.json()
-            return response.text
+                    if response_format == "json":
+                        return response.json()
+                    return response.text
+            except httpx.HTTPStatusError as exc:
+                delay = await _should_retry_503(exc, attempt)
+                if delay is not None:
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+
+        raise RuntimeError("Failed to transcribe audio after retries")
 
 
 async def gather_embeddings(client: EmbeddingClient, texts: Iterable[str]) -> list[list[float]]:

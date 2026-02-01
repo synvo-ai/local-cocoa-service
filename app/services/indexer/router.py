@@ -200,9 +200,40 @@ async def get_summary() -> IndexSummary:
     )
 
 
+@router.get("/error-files")
+async def list_error_files(folder_id: str | None = None) -> list[dict]:
+    """Get list of files that failed to index with their error reasons."""
+    storage = get_storage()
+    loop = asyncio.get_running_loop()
+    
+    error_files = await loop.run_in_executor(None, lambda: storage.list_error_files(folder_id))
+    
+    result = []
+    for f in error_files:
+        # Determine error reason - use stored reason or infer from stage
+        error_reason = f.error_reason
+        if not error_reason:
+            if f.fast_stage == -1:
+                error_reason = "Failed during text extraction (possibly encrypted, corrupted, or wrong file type)"
+            elif f.deep_stage == -1:
+                error_reason = "Failed during vision/deep analysis"
+            else:
+                error_reason = "Unknown error"
+        
+        result.append({
+            "id": f.id,
+            "name": f.name,
+            "path": str(f.path),
+            "error_reason": error_reason,
+            "error_at": f.error_at.isoformat() if f.error_at else None,
+        })
+    
+    return result
+
+
 @router.get("/list", response_model=IndexInventory)
 async def list_index_inventory(
-        limit: int = Query(default=100, ge=1, le=500),
+        limit: int = Query(default=10000, ge=1, le=100000),
         offset: int = Query(default=0, ge=0),
         folder_id: str | None = None,
 ) -> IndexInventory:

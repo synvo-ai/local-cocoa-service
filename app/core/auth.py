@@ -25,7 +25,7 @@ async def verify_api_key(
 ):
     """
     Verify API key and set up request context with proper source identification.
-    
+
     Request sources:
     - local_ui: Requests from Electron app (system key) - can access private files
     - external: External API requests - cannot access private files
@@ -34,14 +34,14 @@ async def verify_api_key(
     """
     # Dev mode bypass: if no key provided, try to read from dev session key file
     if not api_key_header and settings.is_dev:
-        dev_key_path = Path(settings.runtime_root) / DEV_SESSION_KEY_FILE
+        dev_key_path = Path(settings.paths.runtime_root) / DEV_SESSION_KEY_FILE
         if dev_key_path.exists():
             try:
                 api_key_header = dev_key_path.read_text().strip()
                 logger.debug("Using dev session key from file")
             except Exception:
                 pass
-    
+
     if not api_key_header:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="Missing API Key"
@@ -56,12 +56,12 @@ async def verify_api_key(
         )
 
     storage.update_api_key_usage(api_key_header)
-    
+
     # Determine request source for privacy filtering
     # System keys (from Electron app) are treated as local_ui
     # External requests are identified by X-Request-Source header
     source: RequestSource = "external"
-    
+
     if x_request_source:
         # Explicit source header provided
         if x_request_source == "mcp":
@@ -75,13 +75,13 @@ async def verify_api_key(
     elif key_record.is_system:
         # System keys without explicit header are assumed to be from local UI
         source = "local_ui"
-    
+
     # Set request context for privacy filtering throughout this request
     ctx = RequestContext(source=source, api_key=api_key_header)
     set_request_context(ctx)
-    
+
     logger.debug(f"Request context set: source={source}, can_access_private={ctx.can_access_private}")
-    
+
     return key_record
 
 
@@ -113,12 +113,20 @@ def ensure_local_key(base_dir: Path):
 
     # In dev mode, also write to a file for easy access by scripts
     if settings.is_dev:
-        dev_key_path = Path(settings.runtime_root) / DEV_SESSION_KEY_FILE
+        dev_key_path = Path(settings.paths.runtime_root) / DEV_SESSION_KEY_FILE
         try:
             dev_key_path.write_text(session_key)
             logger.info(f"Dev mode: Session key written to {dev_key_path}")
             print(f"DEV_SESSION_KEY_FILE: {dev_key_path}", flush=True)
         except Exception as e:
             logger.warning(f"Failed to write dev session key file: {e}")
+
+    # Clean up old key file if it exists (legacy)
+    key_file = base_dir / "local_key.txt"
+    if key_file.exists():
+        try:
+            key_file.unlink()
+        except OSError:
+            pass
 
     return session_key
