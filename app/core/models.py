@@ -378,6 +378,7 @@ class QaResponse(BaseModel):
     rewritten_query: Optional[str] = None
     query_variants: list[str] = Field(default_factory=list)
     diagnostics: Optional[AgentDiagnostics] = None
+    thinking_steps: Optional[list[dict[str, Any]]] = None
     # FileMenuSystem Search fields (full-chain visualization)
     sub_question_answers: Optional[list[dict[str, Any]]] = None  # Per sub-question answers with evidence
     debug_steps: Optional[list[dict[str, Any]]] = None  # Per-route/stage debug info

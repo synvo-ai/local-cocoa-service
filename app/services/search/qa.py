@@ -52,6 +52,54 @@ class QaMixin:
         all_hits = []
         # StepRecorder expects structured steps - use recorder to track
         recorder = StepRecorder()
+        thinking_steps: list[dict[str, Any]] = []
+
+        def _match_hit(hit: SearchHit, result: dict[str, Any], idx: int) -> bool:
+            hit_chunk_id = hit.chunk_id or hit.metadata.get("chunk_id") or hit.metadata.get("chunkId")
+            result_chunk_id = result.get("chunk_id") or result.get("chunkId")
+            hit_index = hit.metadata.get("index") if isinstance(hit.metadata, dict) else None
+            result_index = result.get("index")
+
+            if hit_chunk_id and result_chunk_id and hit_chunk_id == result_chunk_id:
+                return True
+            if result_index is not None and hit_index is not None and result_index == hit_index:
+                return True
+            if result_index is not None and result_index == (idx + 1):
+                return True
+            return False
+
+        def _apply_analysis_to_hits(results: list[dict[str, Any]]) -> None:
+            if not results:
+                return
+            for idx, hit in enumerate(all_hits):
+                for result in results:
+                    if _match_hit(hit, result, idx):
+                        hit.has_answer = result.get("has_answer")
+                        hit.analysis_comment = result.get("comment")
+                        hit.analysis_confidence = result.get("confidence")
+                        break
+
+            # Update any cached hits inside thinking steps, if present
+            for step in thinking_steps:
+                hits = step.get("hits")
+                if not isinstance(hits, list):
+                    continue
+                for h_idx, h in enumerate(hits):
+                    for result in results:
+                        hit_chunk_id = h.get("chunkId") or h.get("chunk_id") or h.get("metadata", {}).get("chunkId") or h.get("metadata", {}).get("chunk_id")
+                        result_chunk_id = result.get("chunk_id") or result.get("chunkId")
+                        hit_index = h.get("metadata", {}).get("index")
+                        result_index = result.get("index")
+
+                        chunk_match = hit_chunk_id and result_chunk_id and hit_chunk_id == result_chunk_id
+                        index_match = (result_index is not None) and (hit_index is not None) and (result_index == hit_index)
+                        fallback_match = (result_index is not None) and (result_index == (h_idx + 1))
+
+                        if chunk_match or index_match or fallback_match:
+                            h["hasAnswer"] = result.get("has_answer")
+                            h["analysisComment"] = result.get("comment")
+                            h["analysisConfidence"] = result.get("confidence")
+                            break
 
         try:
             async for event_str in self.stream_answer(payload):
@@ -90,10 +138,18 @@ class QaMixin:
 
                         filtered_data = {k: v for k, v in data.items() if k in valid_keys}
                         recorder.add(**filtered_data)
+                        if isinstance(data, dict):
+                            thinking_steps.append(dict(data))
 
                     elif etype == "error":
                         logger.error(f"Stream error: {data}")
                         full_answer += f"\nError: {data}"
+                    elif etype == "chunk_analysis":
+                        if isinstance(data, list):
+                            _apply_analysis_to_hits(data)
+                    elif etype == "chunk_progress":
+                        if isinstance(data, dict) and isinstance(data.get("chunk_result"), dict):
+                            _apply_analysis_to_hits([data["chunk_result"]])
 
                 except json.JSONDecodeError:
                     pass
@@ -105,6 +161,7 @@ class QaMixin:
                 hits=[],
                 latency_ms=int((time.perf_counter() - started) * 1000),
                 diagnostics=recorder.snapshot(),
+                thinking_steps=thinking_steps or None,
             )
 
         return QaResponse(
@@ -112,6 +169,7 @@ class QaMixin:
             hits=all_hits,
             latency_ms=int((time.perf_counter() - started) * 1000),
             diagnostics=recorder.snapshot(),
+            thinking_steps=thinking_steps or None,
         )
 
     async def stream_answer(self: 'SearchEngine', payload: QaRequest) -> AsyncGenerator[str, None]:
@@ -272,7 +330,6 @@ class QaMixin:
             routing_result = await self.intent_component.query_intent_routing(query)
             intent = routing_result.get("intent", "document")
             call_tools = routing_result.get("call_tools", True)
-
         # Path 1: Does not require tools - direct answer
         if not call_tools:
             # Check if model is hibernated and emit loading status, then wait for it
@@ -330,7 +387,6 @@ class QaMixin:
 
             yield json.dumps({"type": "done"}) + "\n"
             return
-
         # Path 2: Requires tools - search docs
 
         # Step 0: Smart Analysis for Multi-path (Async)
@@ -350,7 +406,6 @@ class QaMixin:
 
         try:
             analysis = await self.intent_component.analyze_query(query)
-
             # Emit thinking step: analysis complete
             sub_queries = analysis.get("sub_queries", [query])
             needs_decomp = analysis.get("needs_decomposition", False)

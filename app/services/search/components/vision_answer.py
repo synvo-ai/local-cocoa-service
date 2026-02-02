@@ -324,11 +324,11 @@ class VisionAnswerComponent:
             user_prompt = f"{file_context}\n\nQuestion: {query}\n\nLook at the document page and answer the question."
 
             # Check if vision endpoint is configured
-            if not settings.endpoints.vision:
+            if not settings.endpoints.vision_url:
                 logger.warning("[VISION DEBUG] Vision endpoint not configured, falling back to text")
                 return await self._fallback_text_answer(query, context_part, file_name, file_summary)
 
-            logger.info(f"[VISION DEBUG] Calling VLM describe_frames with vision endpoint: {settings.endpoints.vision}")
+            logger.info(f"[VISION DEBUG] Calling VLM describe_frames with vision endpoint: {settings.endpoints.vision_url}")
             response = await self.llm_client.describe_frames(
                 [page_image],
                 prompt=user_prompt,

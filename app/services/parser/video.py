@@ -53,7 +53,7 @@ class VideoParser(BaseParser):
         transcript_segments = []
         full_transcript_text = ""
         
-        if settings.endpoints.transcription:
+        if settings.endpoints.transcribe_url:
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 tmp_name = tmp.name
             try:
@@ -71,7 +71,7 @@ class VideoParser(BaseParser):
                 if on_progress:
                      on_progress("Transcribing audio...", 25)
 
-                endpoint = f"{settings.endpoints.transcription.rstrip('/')}/inference"
+                endpoint = f"{settings.endpoints.transcribe_url.rstrip('/')}/inference"
                 with httpx.Client(timeout=600.0) as client:
                     files = {"file": ("audio.wav", audio_bytes, "audio/wav")}
                     data = {"temperature": "0.0", "temperature_inc": "0.2", "response_format": "vtt"}

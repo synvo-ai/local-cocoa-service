@@ -32,7 +32,7 @@ def get_build_config(mode: BuildMode) -> Dict:
             "uvicorn", "fastapi", "pydantic", "pydantic_settings", "starlette", "qdrant_client",
             "tiktoken", "rapidocr_onnxruntime", "onnxruntime", "langdetect",
             "certifi", "services", "magika", "markitdown", "grpcio",
-            "azure", "msal", "msgraph", "debugpy", "mcp",
+            "azure", "msal", "msgraph", "debugpy", "mcp", "sse_starlette", "httpx", "dotenv", "mail"
             "docx", "pptx", "openpyxl", "xlrd", "pypdf", "pdfminer", "mammoth", "lxml",
             "bs4", "pymongo", "sounddevice", "pydub", "speech_recognition",
             "rich", "typer", "fitz", "PIL", "cv2", "numpy"

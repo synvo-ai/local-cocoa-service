@@ -58,8 +58,8 @@ class AudioParser(BaseParser):
         vtt_content = None
 
         # Transcribe if endpoint is available
-        if settings.endpoints.transcription:
-            endpoint = f"{settings.endpoints.transcription.rstrip('/')}/inference"
+        if settings.endpoints.transcribe_url:
+            endpoint = f"{settings.endpoints.transcribe_url.rstrip('/')}/inference"
             try:
                 if on_progress:
                     on_progress("Transcribing audio...", 30)

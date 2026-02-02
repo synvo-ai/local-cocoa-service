@@ -260,7 +260,7 @@ class VisionProcessor:
             prompt: Prompt for the VLM.
             max_tokens: Maximum output tokens. If None, uses settings.pdf_page_max_tokens.
         """
-        if not settings.endpoints.vision:
+        if not settings.endpoints.vision_url:
             logger.warning("Vision endpoint not configured.")
             self.last_error = "Vision endpoint not configured"
             return ""

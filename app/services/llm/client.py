@@ -505,7 +505,7 @@ class LlmClient:
                 for retry_503 in range(_503_MAX_RETRIES + 1):
                     try:
                         response = await client.post(
-                            f"{settings.endpoints.vision}/v1/chat/completions",
+                            f"{settings.endpoints.vision_url}/v1/chat/completions",
                             json=payload,
                         )
                         response.raise_for_status()

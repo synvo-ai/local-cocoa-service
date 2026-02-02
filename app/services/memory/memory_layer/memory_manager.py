@@ -47,7 +47,7 @@ class MemoryManager:
         # Get LLM URL from app settings (same as indexer/chat uses)
         # Priority: LLM_BASE_URL env > LOCAL_LLM_URL env > app settings > default
         from core.config import settings
-        llm_url = os.getenv("LLM_BASE_URL") or os.getenv("LOCAL_LLM_URL") or settings.endpoints.llm
+        llm_url = os.getenv("LLM_BASE_URL") or os.getenv("LOCAL_LLM_URL") or settings.endpoints.llm_url
 
         # Unified LLM Provider - shared by all extractors
         # Uses the same LLM endpoint as the rest of the app
