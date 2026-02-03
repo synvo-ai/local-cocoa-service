@@ -817,3 +817,1006 @@ class EmailService:
             return None
         snippet = [line for line in content.splitlines() if line.strip()][:lines]
         return "\n".join(snippet) if snippet else None
+
+    # ==================== Account-Level Memory Integration Methods (v2.5) ====================
+
+    async def build_account_memory(
+        self, 
+        account_id: str, 
+        user_id: str,
+    ) -> dict:
+        """
+        为整个邮箱账户批量构建 Memory（一键构建）
+        
+        Args:
+            account_id: 邮箱账户 ID
+            user_id: 用户 ID
+            
+        Returns:
+            构建结果 dict
+        """
+        import json
+        from datetime import datetime, timezone
+        
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        # 获取该账户下所有邮件
+        messages = self.storage.list_email_messages(account_id, limit=1000)
+        if not messages:
+            return {
+                "success": True,
+                "message": "No messages to process",
+                "account_id": account_id,
+                "total_messages": 0,
+                "memcells_created": 0,
+                "episodes_created": 0,
+                "event_logs_created": 0,
+            }
+        
+        try:
+            from services.memory.service import get_memory_service
+            from services.memory.api_specs.memory_types import RawDataType, MemCell
+            from services.memory.api_specs.memory_models import MemoryType
+            from services.storage.memory import (
+                MemCellRecord as StorageMemCellRecord,
+                EpisodeRecord as StorageEpisodeRecord,
+                EventLogRecord as StorageEventLogRecord,
+            )
+            
+            memory_service = get_memory_service()
+            group_id = f"email_account::{account_id}"
+            
+            total_memcells = 0
+            total_episodes = 0
+            total_event_logs = 0
+            
+            for record in messages:
+                import hashlib
+                now = datetime.now(timezone.utc).isoformat()
+                # 使用稳定的 ID（基于 chunk_id 的 hash），这样相同邮件的 upsert 会更新而不是创建新记录
+                chunk_id = f"email_account_{account_id}_{record.id}"
+                memcell_id = hashlib.sha256(chunk_id.encode()).hexdigest()[:32]
+                
+                # 读取邮件内容
+                try:
+                    markdown = self._read_markdown(record.stored_path)
+                except Exception as e:
+                    logger.warning("Failed to read email %s: %s", record.id, e)
+                    continue
+                
+                # 构建邮件元数据
+                email_metadata = {
+                    "account_id": account_id,
+                    "message_id": record.id,
+                    "subject": record.subject,
+                    "sender": record.sender,
+                    "recipients": record.recipients,
+                    "sent_at": record.sent_at.isoformat() if record.sent_at else None,
+                    "source": "email_account_build",
+                }
+                
+                original_data_dict = {
+                    "content": markdown,
+                    "email_subject": record.subject,
+                    "email_sender": record.sender,
+                    "email_recipients": record.recipients,
+                    "email_date": record.sent_at.isoformat() if record.sent_at else "",
+                }
+                
+                # 创建 MemCell
+                memcell = MemCell(
+                    event_id=memcell_id,
+                    user_id_list=[user_id],
+                    original_data=[original_data_dict],
+                    timestamp=datetime.now(timezone.utc),
+                    summary=f"Email: {record.subject}" if record.subject else "Email message",
+                    group_id=group_id,
+                    participants=[record.sender] if record.sender else [],
+                    type=RawDataType.DOCUMENT,
+                )
+                
+                # 持久化 MemCell（使用稳定的 chunk_id）
+                storage_memcell = StorageMemCellRecord(
+                    id=memcell_id,
+                    user_id=user_id,
+                    original_data=json.dumps([original_data_dict]),
+                    summary=f"Email: {record.subject}" if record.subject else "Email message",
+                    subject=record.subject,
+                    file_id=None,
+                    chunk_id=chunk_id,
+                    chunk_ordinal=0,
+                    type="Document",
+                    keywords=None,
+                    timestamp=now,
+                    metadata=email_metadata,
+                )
+                memory_service.storage.upsert_memcell(storage_memcell)
+                total_memcells += 1
+                
+                # 提取情节记忆
+                try:
+                    logger.info("📧 [MEMORY] Extracting episode for email: %s", record.subject or record.id)
+                    episode = await memory_service.memory_manager.extract_memory(
+                        memcell=memcell,
+                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        user_id=user_id,
+                    )
+                    
+                    if episode:
+                        logger.info("📧 [MEMORY] Episode extracted successfully for: %s", record.subject or record.id)
+                        # 使用稳定的 Episode ID（基于 memcell_id）
+                        episode_id = hashlib.sha256(f"{memcell_id}_episode".encode()).hexdigest()[:32]
+                        storage_episode = StorageEpisodeRecord(
+                            id=episode_id,
+                            user_id=user_id,
+                            summary=getattr(episode, "summary", record.subject or ""),
+                            episode=getattr(episode, "episode", ""),
+                            subject=getattr(episode, "subject", record.subject),
+                            timestamp=now,
+                            parent_memcell_id=memcell_id,
+                            metadata=email_metadata,
+                        )
+                        memory_service.storage.upsert_episode(storage_episode)
+                        total_episodes += 1
+                        
+                        # 提取事件日志
+                        try:
+                            logger.info("📧 [MEMORY] Extracting event log for episode: %s", episode_id)
+                            event_log = await memory_service.memory_manager.extract_memory(
+                                memcell=memcell,
+                                memory_type=MemoryType.EVENT_LOG,
+                                user_id=user_id,
+                                episode_memory=episode,
+                            )
+                            if event_log:
+                                facts = getattr(event_log, "atomic_fact", [])
+                                if isinstance(facts, str):
+                                    facts = [facts]
+                                logger.info("📧 [MEMORY] EventLog extracted: %d facts", len(facts))
+                                for idx_fact, fact in enumerate(facts):
+                                    if fact and fact.strip():
+                                        # 使用稳定的 EventLog ID（基于 episode_id + fact 索引）
+                                        log_id = hashlib.sha256(f"{episode_id}_fact_{idx_fact}".encode()).hexdigest()[:32]
+                                        storage_log = StorageEventLogRecord(
+                                            id=log_id,
+                                            user_id=user_id,
+                                            atomic_fact=fact.strip(),
+                                            timestamp=now,
+                                            parent_episode_id=episode_id,
+                                            metadata={"account_id": account_id, "message_id": record.id},
+                                        )
+                                        memory_service.storage.upsert_event_log(storage_log)
+                                        total_event_logs += 1
+                            else:
+                                logger.warning("📧 [MEMORY] EventLog extraction returned None for episode: %s", episode_id)
+                        except Exception as e:
+                            logger.error("📧 [MEMORY] Event log extraction failed for email %s: %s", record.id, e, exc_info=True)
+                    else:
+                        logger.warning("📧 [MEMORY] Episode extraction returned None for: %s", record.subject or record.id)
+                            
+                except Exception as e:
+                    logger.error("📧 [MEMORY] Episode extraction failed for email %s: %s", record.id, e, exc_info=True)
+            
+            logger.info("📧 [MEMORY] Account %s memory built: %d memcells, %d episodes, %d event logs", 
+                       account_id, total_memcells, total_episodes, total_event_logs)
+            
+            return {
+                "success": True,
+                "message": f"Memory built successfully for {total_memcells} emails",
+                "account_id": account_id,
+                "total_messages": len(messages),
+                "memcells_created": total_memcells,
+                "episodes_created": total_episodes,
+                "event_logs_created": total_event_logs,
+            }
+            
+        except Exception as e:
+            logger.error("Failed to build memory for account %s: %s", account_id, e)
+            return {
+                "success": False,
+                "message": f"Failed to build memory: {str(e)}",
+                "account_id": account_id,
+                "total_messages": 0,
+                "memcells_created": 0,
+                "episodes_created": 0,
+                "event_logs_created": 0,
+            }
+
+    async def build_account_memory_stream(self, account_id: str, user_id: str, force: bool = False):
+        """
+        流式构建 Memory，实时报告进度
+        
+        Args:
+            account_id: 邮箱账户 ID
+            user_id: 用户 ID
+            force: 是否强制重建所有邮件的 Memory（忽略已打标的邮件）
+        
+        Yields:
+            进度更新 dict，包含 type, current, total, email_subject, memory_result 等字段
+        """
+        import json
+        from datetime import datetime, timezone
+        
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        # 获取该账户下所有邮件
+        messages = self.storage.list_email_messages(account_id, limit=1000)
+        total_count = len(messages)
+        
+        # 初始进度
+        yield {
+            "type": "start",
+            "account_id": account_id,
+            "total": total_count,
+            "force": force,
+            "message": f"Starting memory build for {total_count} emails..." + (" (force rebuild)" if force else "")
+        }
+        
+        if not messages:
+            yield {
+                "type": "complete",
+                "account_id": account_id,
+                "total": 0,
+                "memcells_created": 0,
+                "episodes_created": 0,
+                "event_logs_created": 0,
+                "skipped": 0,
+                "message": "No messages to process"
+            }
+            return
+        
+        try:
+            from services.memory.service import get_memory_service
+            from services.memory.api_specs.memory_types import RawDataType, MemCell
+            from services.memory.api_specs.memory_models import MemoryType
+            from services.storage.memory import (
+                MemCellRecord as StorageMemCellRecord,
+                EpisodeRecord as StorageEpisodeRecord,
+                EventLogRecord as StorageEventLogRecord,
+            )
+            
+            memory_service = get_memory_service()
+            group_id = f"email_account::{account_id}"
+            
+            total_memcells = 0
+            total_episodes = 0
+            total_event_logs = 0
+            total_skipped = 0
+            
+            for idx, record in enumerate(messages):
+                now = datetime.now(timezone.utc).isoformat()
+                
+                # 构建 chunk_id 来检查是否已处理
+                chunk_id = f"email_account_{account_id}_{record.id}"
+                
+                # 检查是否已有 MemCell（除非是 force rebuild）
+                if not force:
+                    existing_memcells = memory_service.storage.get_memcells_by_chunk_id(chunk_id)
+                    if existing_memcells:
+                        total_skipped += 1
+                        yield {
+                            "type": "skipped",
+                            "current": idx + 1,
+                            "total": total_count,
+                            "percentage": round((idx + 1) / total_count * 100, 1),
+                            "email_id": record.id,
+                            "email_subject": record.subject or "(No Subject)",
+                            "email_sender": record.sender or "",
+                            "message": f"Skipping already processed email: {record.subject or '(No Subject)'}",
+                            "stats": {
+                                "memcells": total_memcells,
+                                "episodes": total_episodes,
+                                "facts": total_event_logs,
+                                "skipped": total_skipped,
+                            },
+                        }
+                        continue
+                
+                # 使用稳定的 ID（基于 chunk_id 的 hash），这样相同邮件的 upsert 会更新而不是创建新记录
+                import hashlib
+                chunk_id = f"email_account_{account_id}_{record.id}"
+                memcell_id = hashlib.sha256(chunk_id.encode()).hexdigest()[:32]
+                
+                # 当前邮件进度
+                yield {
+                    "type": "processing",
+                    "current": idx + 1,
+                    "total": total_count,
+                    "percentage": round((idx + 1) / total_count * 100, 1),
+                    "email_id": record.id,
+                    "email_subject": record.subject or "(No Subject)",
+                    "email_sender": record.sender or "",
+                    "message": f"Processing email {idx + 1}/{total_count}: {record.subject or '(No Subject)'}"
+                }
+                
+                # 读取邮件内容
+                try:
+                    markdown = self._read_markdown(record.stored_path)
+                except Exception as e:
+                    # 记录失败状态
+                    self.storage.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
+                    yield {
+                        "type": "email_error",
+                        "current": idx + 1,
+                        "total": total_count,
+                        "email_id": record.id,
+                        "email_subject": record.subject or "(No Subject)",
+                        "error": f"Failed to read email: {str(e)}"
+                    }
+                    continue
+                
+                # 构建邮件元数据
+                email_metadata = {
+                    "account_id": account_id,
+                    "message_id": record.id,
+                    "subject": record.subject,
+                    "sender": record.sender,
+                    "recipients": record.recipients,
+                    "sent_at": record.sent_at.isoformat() if record.sent_at else None,
+                    "source": "email_account_build",
+                }
+                
+                original_data_dict = {
+                    "content": markdown,
+                    "email_subject": record.subject,
+                    "email_sender": record.sender,
+                    "email_recipients": record.recipients,
+                    "email_date": record.sent_at.isoformat() if record.sent_at else "",
+                }
+                
+                # 创建 MemCell
+                memcell = MemCell(
+                    event_id=memcell_id,
+                    user_id_list=[user_id],
+                    original_data=[original_data_dict],
+                    timestamp=datetime.now(timezone.utc),
+                    summary=f"Email: {record.subject}" if record.subject else "Email message",
+                    group_id=group_id,
+                    participants=[record.sender] if record.sender else [],
+                    type=RawDataType.DOCUMENT,
+                )
+                
+                # 持久化 MemCell（使用稳定的 chunk_id）
+                storage_memcell = StorageMemCellRecord(
+                    id=memcell_id,
+                    user_id=user_id,
+                    original_data=json.dumps([original_data_dict]),
+                    summary=f"Email: {record.subject}" if record.subject else "Email message",
+                    subject=record.subject,
+                    file_id=None,
+                    chunk_id=chunk_id,
+                    chunk_ordinal=0,
+                    type="Document",
+                    keywords=None,
+                    timestamp=now,
+                    metadata=email_metadata,
+                )
+                memory_service.storage.upsert_memcell(storage_memcell)
+                total_memcells += 1
+                
+                # 邮件结果
+                email_result = {
+                    "email_id": record.id,
+                    "email_subject": record.subject or "(No Subject)",
+                    "memcell_created": True,
+                    "episode_created": False,
+                    "episode_summary": None,
+                    "facts_extracted": [],
+                }
+                
+                # 提取情节记忆
+                try:
+                    episode = await memory_service.memory_manager.extract_memory(
+                        memcell=memcell,
+                        memory_type=MemoryType.EPISODIC_MEMORY,
+                        user_id=user_id,
+                    )
+                    
+                    if episode:
+                        # 使用稳定的 Episode ID（基于 memcell_id）
+                        episode_id = hashlib.sha256(f"{memcell_id}_episode".encode()).hexdigest()[:32]
+                        episode_summary = getattr(episode, "summary", record.subject or "")
+                        episode_content = getattr(episode, "episode", "")
+                        
+                        # 如果是 force rebuild，先删除旧的 event_logs（episode 会被 upsert 覆盖）
+                        if force:
+                            try:
+                                memory_service.storage.delete_event_logs_by_episode(episode_id)
+                            except Exception:
+                                pass  # Ignore if delete fails
+                        
+                        storage_episode = StorageEpisodeRecord(
+                            id=episode_id,
+                            user_id=user_id,
+                            summary=episode_summary,
+                            episode=episode_content,
+                            subject=getattr(episode, "subject", record.subject),
+                            timestamp=now,
+                            parent_memcell_id=memcell_id,
+                            metadata=email_metadata,
+                        )
+                        memory_service.storage.upsert_episode(storage_episode)
+                        total_episodes += 1
+                        email_result["episode_created"] = True
+                        email_result["episode_summary"] = episode_summary[:200] if episode_summary else None
+                        
+                        # 提取事件日志
+                        try:
+                            event_log = await memory_service.memory_manager.extract_memory(
+                                memcell=memcell,
+                                memory_type=MemoryType.EVENT_LOG,
+                                user_id=user_id,
+                                episode_memory=episode,
+                            )
+                            if event_log:
+                                facts = getattr(event_log, "atomic_fact", [])
+                                if isinstance(facts, str):
+                                    facts = [facts]
+                                for idx_fact, fact in enumerate(facts):
+                                    if fact and fact.strip():
+                                        # 使用稳定的 EventLog ID（基于 episode_id + fact 索引）
+                                        log_id = hashlib.sha256(f"{episode_id}_fact_{idx_fact}".encode()).hexdigest()[:32]
+                                        storage_log = StorageEventLogRecord(
+                                            id=log_id,
+                                            user_id=user_id,
+                                            atomic_fact=fact.strip(),
+                                            timestamp=now,
+                                            parent_episode_id=episode_id,
+                                            metadata={"account_id": account_id, "message_id": record.id},
+                                        )
+                                        memory_service.storage.upsert_event_log(storage_log)
+                                        total_event_logs += 1
+                                        email_result["facts_extracted"].append(fact.strip()[:100])
+                        except Exception as e:
+                            logger.warning("Event log extraction failed for email %s: %s", record.id, e)
+                            # EventLog 失败不算整体失败，只是警告
+                except Exception as e:
+                    logger.warning("Episode extraction failed for email %s: %s", record.id, e)
+                    # Episode 提取失败，记录为失败状态
+                    self.storage.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
+                    email_result["error"] = str(e)
+                
+                # 如果没有错误，标记为成功
+                if "error" not in email_result:
+                    self.storage.update_email_memory_status(record.id, 'success')
+                
+                # 单封邮件处理完成
+                yield {
+                    "type": "email_complete",
+                    "current": idx + 1,
+                    "total": total_count,
+                    "percentage": round((idx + 1) / total_count * 100, 1),
+                    "stats": {
+                        "memcells": total_memcells,
+                        "episodes": total_episodes,
+                        "facts": total_event_logs,
+                        "skipped": total_skipped,
+                    },
+                    "email_result": email_result,
+                }
+            
+            # 全部完成
+            skip_msg = f", {total_skipped} skipped" if total_skipped > 0 else ""
+            yield {
+                "type": "complete",
+                "account_id": account_id,
+                "total": total_count,
+                "memcells_created": total_memcells,
+                "episodes_created": total_episodes,
+                "event_logs_created": total_event_logs,
+                "skipped": total_skipped,
+                "message": f"Memory build complete: {total_memcells} memcells, {total_episodes} episodes, {total_event_logs} facts{skip_msg}"
+            }
+            
+        except Exception as e:
+            logger.error("Failed to build memory for account %s: %s", account_id, e)
+            yield {
+                "type": "error",
+                "account_id": account_id,
+                "message": f"Failed to build memory: {str(e)}"
+            }
+
+    async def retry_single_email(self, account_id: str, message_id: str, user_id: str):
+        """
+        重试单个失败的邮件打标
+        
+        Yields:
+            进度更新 dict
+        """
+        import json
+        import hashlib
+        from datetime import datetime, timezone
+        
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        # 获取邮件记录
+        record = self.storage.get_email_message(message_id)
+        if not record:
+            yield {
+                "type": "error",
+                "message": f"Email message not found: {message_id}"
+            }
+            return
+        
+        yield {
+            "type": "start",
+            "message_id": message_id,
+            "subject": record.subject or "(No Subject)",
+            "message": f"Retrying email: {record.subject or '(No Subject)'}"
+        }
+        
+        try:
+            from services.memory.service import get_memory_service
+            from services.memory.api_specs.memory_types import RawDataType, MemCell
+            from services.memory.api_specs.memory_models import MemoryType
+            from services.storage.memory import (
+                MemCellRecord as StorageMemCellRecord,
+                EpisodeRecord as StorageEpisodeRecord,
+                EventLogRecord as StorageEventLogRecord,
+            )
+            
+            memory_service = get_memory_service()
+            group_id = f"email_account::{account_id}"
+            
+            now = datetime.now(timezone.utc).isoformat()
+            chunk_id = f"email_account_{account_id}_{record.id}"
+            memcell_id = hashlib.sha256(chunk_id.encode()).hexdigest()[:32]
+            
+            # 读取邮件内容
+            try:
+                markdown = self._read_markdown(record.stored_path)
+            except Exception as e:
+                self.storage.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
+                yield {
+                    "type": "error",
+                    "message_id": message_id,
+                    "error": f"Failed to read email: {str(e)}"
+                }
+                return
+            
+            # 构建邮件元数据
+            email_metadata = {
+                "account_id": account_id,
+                "message_id": record.id,
+                "subject": record.subject,
+                "sender": record.sender,
+                "recipients": record.recipients,
+                "sent_at": record.sent_at.isoformat() if record.sent_at else None,
+                "source": "email_retry",
+            }
+            
+            original_data_dict = {
+                "content": markdown,
+                "email_subject": record.subject,
+                "email_sender": record.sender,
+                "email_recipients": record.recipients,
+                "email_date": record.sent_at.isoformat() if record.sent_at else "",
+            }
+            
+            # 创建 MemCell
+            memcell = MemCell(
+                event_id=memcell_id,
+                user_id_list=[user_id],
+                original_data=[original_data_dict],
+                timestamp=datetime.now(timezone.utc),
+                summary=f"Email: {record.subject}" if record.subject else "Email message",
+                group_id=group_id,
+                participants=[record.sender] if record.sender else [],
+                type=RawDataType.DOCUMENT,
+            )
+            
+            # 持久化 MemCell
+            storage_memcell = StorageMemCellRecord(
+                id=memcell_id,
+                user_id=user_id,
+                original_data=json.dumps([original_data_dict]),
+                summary=f"Email: {record.subject}" if record.subject else "Email message",
+                subject=record.subject,
+                file_id=None,
+                chunk_id=chunk_id,
+                chunk_ordinal=0,
+                type="Document",
+                keywords=None,
+                timestamp=now,
+                metadata=email_metadata,
+            )
+            memory_service.storage.upsert_memcell(storage_memcell)
+            
+            yield {
+                "type": "progress",
+                "message_id": message_id,
+                "step": "memcell",
+                "message": "MemCell created"
+            }
+            
+            # 提取情节记忆
+            episode_id = hashlib.sha256(f"{memcell_id}_episode".encode()).hexdigest()[:32]
+            episode_created = False
+            facts_extracted = []
+            
+            try:
+                # 先删除旧的 event_logs
+                try:
+                    memory_service.storage.delete_event_logs_by_episode(episode_id)
+                except Exception:
+                    pass
+                
+                episode = await memory_service.memory_manager.extract_memory(
+                    memcell=memcell,
+                    memory_type=MemoryType.EPISODIC_MEMORY,
+                    user_id=user_id,
+                )
+                
+                if episode:
+                    episode_summary = getattr(episode, "summary", record.subject or "")
+                    episode_content = getattr(episode, "episode", "")
+                    
+                    storage_episode = StorageEpisodeRecord(
+                        id=episode_id,
+                        user_id=user_id,
+                        summary=episode_summary,
+                        episode=episode_content,
+                        subject=getattr(episode, "subject", record.subject),
+                        timestamp=now,
+                        parent_memcell_id=memcell_id,
+                        metadata=email_metadata,
+                    )
+                    memory_service.storage.upsert_episode(storage_episode)
+                    episode_created = True
+                    
+                    yield {
+                        "type": "progress",
+                        "message_id": message_id,
+                        "step": "episode",
+                        "message": "Episode extracted"
+                    }
+                    
+                    # 提取事件日志
+                    try:
+                        event_log = await memory_service.memory_manager.extract_memory(
+                            memcell=memcell,
+                            memory_type=MemoryType.EVENT_LOG,
+                            user_id=user_id,
+                            episode_memory=episode,
+                        )
+                        if event_log:
+                            facts = getattr(event_log, "atomic_fact", [])
+                            if isinstance(facts, str):
+                                facts = [facts]
+                            for idx_fact, fact in enumerate(facts):
+                                if fact and fact.strip():
+                                    log_id = hashlib.sha256(f"{episode_id}_fact_{idx_fact}".encode()).hexdigest()[:32]
+                                    storage_log = StorageEventLogRecord(
+                                        id=log_id,
+                                        user_id=user_id,
+                                        atomic_fact=fact.strip(),
+                                        timestamp=now,
+                                        parent_episode_id=episode_id,
+                                        metadata={"account_id": account_id, "message_id": record.id},
+                                    )
+                                    memory_service.storage.upsert_event_log(storage_log)
+                                    facts_extracted.append(fact.strip()[:100])
+                    except Exception as e:
+                        logger.warning("Event log extraction failed for email %s: %s", record.id, e)
+                        
+            except Exception as e:
+                logger.warning("Episode extraction failed for email %s: %s", record.id, e)
+                self.storage.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
+                yield {
+                    "type": "error",
+                    "message_id": message_id,
+                    "error": f"Episode extraction failed: {str(e)}"
+                }
+                return
+            
+            # 标记为成功
+            self.storage.update_email_memory_status(record.id, 'success')
+            
+            yield {
+                "type": "complete",
+                "message_id": message_id,
+                "subject": record.subject or "(No Subject)",
+                "memcell_created": True,
+                "episode_created": episode_created,
+                "facts_count": len(facts_extracted),
+                "message": f"Retry successful: {record.subject or '(No Subject)'}"
+            }
+            
+        except Exception as e:
+            logger.error("Failed to retry email %s: %s", message_id, e)
+            self.storage.update_email_memory_status(record.id, 'failed', str(e))
+            yield {
+                "type": "error",
+                "message_id": message_id,
+                "error": str(e)
+            }
+
+    async def get_account_memory_status(self, account_id: str, user_id: str) -> dict:
+        """获取邮箱账户的 Memory 状态"""
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        try:
+            from services.memory.service import get_memory_service
+            memory_service = get_memory_service()
+            
+            # 查找与该账户相关的 MemCells (通过 group_id 前缀匹配)
+            group_id = f"email_account::{account_id}"
+            memcells = memory_service.storage.get_memcells_by_group_id(group_id)
+            
+            if not memcells:
+                return {
+                    "account_id": account_id,
+                    "is_built": False,
+                    "memcell_count": 0,
+                    "episode_count": 0,
+                    "event_log_count": 0,
+                    "last_built_at": None,
+                }
+            
+            # 统计 episodes 和 event logs
+            episode_count = 0
+            event_log_count = 0
+            latest_timestamp = None
+            
+            for memcell in memcells:
+                episodes = memory_service.storage.get_episodes_by_memcell(memcell.id)
+                episode_count += len(episodes)
+                
+                for ep in episodes:
+                    logs = memory_service.storage.get_event_logs_by_episode(ep.id)
+                    event_log_count += len(logs)
+                
+                # 跟踪最新时间戳
+                if memcell.timestamp:
+                    if latest_timestamp is None or memcell.timestamp > latest_timestamp:
+                        latest_timestamp = memcell.timestamp
+            
+            return {
+                "account_id": account_id,
+                "is_built": True,
+                "memcell_count": len(memcells),
+                "episode_count": episode_count,
+                "event_log_count": event_log_count,
+                "last_built_at": latest_timestamp,
+            }
+            
+        except Exception as e:
+            logger.warning("Failed to get memory status for account %s: %s", account_id, e)
+            return {
+                "account_id": account_id,
+                "is_built": False,
+                "memcell_count": 0,
+                "episode_count": 0,
+                "event_log_count": 0,
+                "last_built_at": None,
+            }
+
+    async def account_qa(
+        self, 
+        account_id: str, 
+        question: str, 
+        user_id: str,
+    ) -> dict:
+        """
+        邮箱账户级别问答：基于该账户的所有邮件记忆进行问答
+        
+        Args:
+            account_id: 邮箱账户 ID
+            question: 用户问题
+            user_id: 用户 ID
+            
+        Returns:
+            QA 结果 dict
+        """
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        try:
+            from core.context import get_llm_client
+            from services.memory.service import get_memory_service
+            
+            llm_client = get_llm_client()
+            memory_service = get_memory_service()
+            sources = []
+            
+            # 获取该账户的邮件记忆 (通过 group_id 过滤)
+            group_id = f"email_account::{account_id}"
+            memcells = memory_service.storage.get_memcells_by_group_id(group_id)
+            
+            # 构建邮件上下文
+            email_context = f"""## 邮箱信息
+- 邮箱: {account.label} ({account.username})
+- 已索引邮件数: {len(memcells)}
+"""
+            
+            # 获取相关记忆 (基于问题检索)
+            memory_context = ""
+            if memcells:
+                # 简单方法：遍历 memcells 找到相关的
+                # 更好的方法是使用向量检索，但这里简化处理
+                relevant_memories = []
+                for memcell in memcells[:20]:  # 限制数量避免太长
+                    try:
+                        import json
+                        data = json.loads(memcell.original_data) if isinstance(memcell.original_data, str) else memcell.original_data
+                        if isinstance(data, list) and len(data) > 0:
+                            content = data[0].get("content", "")[:500]  # 截断
+                            subject = data[0].get("email_subject", "")
+                            sender = data[0].get("email_sender", "")
+                            relevant_memories.append({
+                                "subject": subject,
+                                "sender": sender,
+                                "preview": content[:200],
+                            })
+                            sources.append({
+                                "type": "email_memory",
+                                "id": memcell.id,
+                                "subject": subject,
+                                "sender": sender,
+                            })
+                    except Exception:
+                        pass
+                
+                if relevant_memories:
+                    memory_context = "\n\n## 邮件记忆摘要\n"
+                    for i, mem in enumerate(relevant_memories[:10], 1):
+                        memory_context += f"{i}. **{mem['subject']}** (from: {mem['sender']})\n"
+                        memory_context += f"   {mem['preview'][:100]}...\n\n"
+            
+            # 构建 prompt
+            system_prompt = f"""你是一个智能邮件助手，帮助用户分析和理解他们的邮箱内容。
+当前用户正在查询邮箱 "{account.label}" 中的邮件信息。
+请基于提供的邮件记忆回答用户的问题。
+回答要简洁准确，如果信息不足请明确说明。"""
+            
+            user_prompt = f"""
+{email_context}
+{memory_context}
+
+## 用户问题
+{question}
+
+请基于上述邮件记忆回答用户的问题："""
+            
+            # 调用 LLM
+            answer = await llm_client.chat_complete(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.7,
+                max_tokens=1024,
+            )
+            
+            return {
+                "answer": answer,
+                "sources": sources[:10],  # 限制返回数量
+                "account_id": account_id,
+                "memories_used": len(sources),
+            }
+            
+        except Exception as e:
+            logger.error("Account QA failed for %s: %s", account_id, e)
+            raise EmailServiceError(f"QA failed: {str(e)}") from e
+
+    async def get_account_memory_details(
+        self, 
+        account_id: str, 
+        user_id: str,
+        limit: int = 50,
+    ) -> dict:
+        """
+        获取邮箱账户的 Memory 详情：MemCells、Episodes 和 Facts 列表
+        
+        Args:
+            account_id: 邮箱账户 ID
+            user_id: 用户 ID
+            limit: 最大返回数量
+            
+        Returns:
+            包含 memcells、episodes、facts 列表的 dict
+        """
+        account = self.storage.get_email_account(account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+        
+        try:
+            from services.memory.service import get_memory_service
+            import json
+            
+            memory_service = get_memory_service()
+            group_id = f"email_account::{account_id}"
+            
+            # 获取该账户的所有 MemCells
+            memcells = memory_service.storage.get_memcells_by_group_id(group_id)
+            
+            memcells_list = []
+            episodes_list = []
+            facts_list = []
+            
+            for memcell in memcells[:limit]:
+                # 从 memcell 的 original_data 中提取邮件信息
+                email_subject = None
+                email_sender = None
+                email_preview = None
+                try:
+                    if memcell.original_data:
+                        data = json.loads(memcell.original_data) if isinstance(memcell.original_data, str) else memcell.original_data
+                        if isinstance(data, list) and len(data) > 0:
+                            email_subject = data[0].get("email_subject")
+                            email_sender = data[0].get("email_sender")
+                            content = data[0].get("content", "")
+                            email_preview = content[:200] if content else None
+                except Exception:
+                    pass
+                
+                # 添加 MemCell
+                memcells_list.append({
+                    "id": memcell.id,
+                    "email_subject": email_subject or memcell.subject or "(No Subject)",
+                    "email_sender": email_sender or "",
+                    "preview": email_preview or memcell.summary or "",
+                    "timestamp": memcell.timestamp,
+                })
+                
+                # 获取 MemCell 关联的 Episodes
+                episodes = memory_service.storage.get_episodes_by_memcell(memcell.id)
+                
+                for ep in episodes:
+                    # 添加 Episode
+                    episodes_list.append({
+                        "id": ep.id,
+                        "memcell_id": memcell.id,
+                        "email_subject": email_subject or ep.subject,
+                        "summary": ep.summary or "",
+                        "episode": ep.episode or "",
+                        "timestamp": ep.timestamp,
+                    })
+                    
+                    # 获取 Episode 关联的 EventLogs (Facts)
+                    event_logs = memory_service.storage.get_event_logs_by_episode(ep.id)
+                    for log in event_logs:
+                        if log.atomic_fact:
+                            facts_list.append({
+                                "id": log.id,
+                                "episode_id": ep.id,
+                                "email_subject": email_subject or ep.subject,
+                                "fact": log.atomic_fact,
+                                "timestamp": log.timestamp,
+                            })
+            
+            result = {
+                "account_id": account_id,
+                "memcells": memcells_list,
+                "episodes": episodes_list,
+                "facts": facts_list,
+                "total_memcells": len(memcells_list),
+                "total_episodes": len(episodes_list),
+                "total_facts": len(facts_list),
+            }
+            logger.info(
+                "get_account_memory_details: account=%s, memcells=%d, episodes=%d, facts=%d",
+                account_id, len(memcells_list), len(episodes_list), len(facts_list)
+            )
+            return result
+            
+        except Exception as e:
+            logger.warning("Failed to get memory details for account %s: %s", account_id, e)
+            return {
+                "account_id": account_id,
+                "memcells": [],
+                "episodes": [],
+                "facts": [],
+                "total_memcells": 0,
+                "total_episodes": 0,
+                "total_facts": 0,
+            }

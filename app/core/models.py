@@ -519,6 +519,10 @@ class EmailMessageRecord(BaseModel):
     stored_path: Path
     size: int
     created_at: dt.datetime
+    # Memory build status: 'pending', 'success', 'failed'
+    memory_status: Optional[str] = None
+    memory_error: Optional[str] = None
+    memory_built_at: Optional[dt.datetime] = None
 
     @field_serializer("stored_path", when_used="json")
     def _serialize_stored_path(self, value: Path) -> str:

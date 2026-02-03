@@ -31,6 +31,10 @@ class EmailMixin:
         add_account_column("enabled", "INTEGER NOT NULL DEFAULT 1")
         add_message_column("recipients", "TEXT")
         add_message_column("created_at", "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
+        # Memory build status columns
+        add_message_column("memory_status", "TEXT")  # 'pending', 'success', 'failed'
+        add_message_column("memory_error", "TEXT")
+        add_message_column("memory_built_at", "TEXT")
         
         # Migrations that were inline
         try:
@@ -198,6 +202,60 @@ class EmailMixin:
                 removed = len(orphan_ids)
         return removed
 
+    def update_email_memory_status(
+        self, 
+        message_id: str, 
+        status: str, 
+        error: Optional[str] = None
+    ) -> None:
+        """Update memory build status for an email message.
+        
+        Args:
+            message_id: Email message ID
+            status: 'pending', 'success', or 'failed'
+            error: Error message if status is 'failed'
+        """
+        now = dt.datetime.now(dt.timezone.utc).isoformat()
+        with self.connect() as conn:  # type: ignore
+            self._ensure_email_columns(conn)
+            conn.execute(
+                """
+                UPDATE email_messages 
+                SET memory_status = ?, memory_error = ?, memory_built_at = ?
+                WHERE id = ?
+                """,
+                (status, error, now if status in ('success', 'failed') else None, message_id),
+            )
+
+    def list_failed_email_messages(self, account_id: str) -> list[EmailMessageRecord]:
+        """Get email messages that failed memory build."""
+        with self.connect() as conn:  # type: ignore
+            self._ensure_email_columns(conn)
+            rows = conn.execute(
+                "SELECT * FROM email_messages WHERE account_id = ? AND memory_status = 'failed' ORDER BY created_at DESC",
+                (account_id,),
+            ).fetchall()
+        return [self._row_to_email_message(row) for row in rows]
+
+    def list_pending_email_messages(self, account_id: str) -> list[EmailMessageRecord]:
+        """Get email messages that haven't been processed yet."""
+        with self.connect() as conn:  # type: ignore
+            self._ensure_email_columns(conn)
+            rows = conn.execute(
+                "SELECT * FROM email_messages WHERE account_id = ? AND (memory_status IS NULL OR memory_status = 'pending') ORDER BY created_at DESC",
+                (account_id,),
+            ).fetchall()
+        return [self._row_to_email_message(row) for row in rows]
+
+    def reset_email_memory_status(self, message_id: str) -> None:
+        """Reset memory status to pending for retry."""
+        with self.connect() as conn:  # type: ignore
+            self._ensure_email_columns(conn)
+            conn.execute(
+                "UPDATE email_messages SET memory_status = 'pending', memory_error = NULL, memory_built_at = NULL WHERE id = ?",
+                (message_id,),
+            )
+
     @staticmethod
     def _row_to_email_account(row: sqlite3.Row) -> EmailAccount:
         return EmailAccount(
@@ -230,6 +288,7 @@ class EmailMixin:
                     recipients = [str(item) for item in data]
             except json.JSONDecodeError:
                 recipients = [str(recipients_payload)]
+        keys = row.keys()
         return EmailMessageRecord(
             id=row["id"],
             account_id=row["account_id"],
@@ -241,4 +300,7 @@ class EmailMixin:
             stored_path=Path(row["stored_path"]),
             size=int(row["size"]),
             created_at=dt.datetime.fromisoformat(row["created_at"]),
+            memory_status=row["memory_status"] if "memory_status" in keys else None,
+            memory_error=row["memory_error"] if "memory_error" in keys else None,
+            memory_built_at=dt.datetime.fromisoformat(row["memory_built_at"]) if "memory_built_at" in keys and row["memory_built_at"] else None,
         )

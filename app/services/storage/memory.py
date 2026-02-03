@@ -328,6 +328,33 @@ class MemoryMixin:
             ).fetchone()
         return row["cnt"] if row else 0
 
+    def delete_event_log(self, event_log_id: str) -> None:
+        """Delete an event log."""
+        with self.connect() as conn:
+            self._ensure_memory_schema(conn)
+            conn.execute("DELETE FROM memory_event_logs WHERE id = ?", (event_log_id,))
+            conn.execute(
+                "DELETE FROM memory_fts WHERE memory_id = ? AND memory_type = 'event_log'",
+                (event_log_id,)
+            )
+
+    def delete_event_logs_by_episode(self, episode_id: str) -> None:
+        """Delete all event logs linked to a specific episode."""
+        with self.connect() as conn:
+            self._ensure_memory_schema(conn)
+            # Get IDs first for FTS cleanup
+            rows = conn.execute(
+                "SELECT id FROM memory_event_logs WHERE parent_episode_id = ?",
+                (episode_id,),
+            ).fetchall()
+            for row in rows:
+                conn.execute(
+                    "DELETE FROM memory_fts WHERE memory_id = ? AND memory_type = 'event_log'",
+                    (row["id"],)
+                )
+            # Delete the records
+            conn.execute("DELETE FROM memory_event_logs WHERE parent_episode_id = ?", (episode_id,))
+
     # ==================== Foresights ====================
 
     def upsert_foresight(self, record: ForesightRecord) -> None:
@@ -684,3 +711,99 @@ class MemoryMixin:
                 "DELETE FROM memory_fts WHERE memory_id = ? AND memory_type = 'memcell'",
                 (memcell_id,)
             )
+
+    def get_memcells_by_chunk_id(self, chunk_id: str) -> List[MemCellRecord]:
+        """Get MemCells by chunk_id (used for email memory status lookup)."""
+        with self.connect() as conn:
+            self._ensure_memory_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT id, user_id, original_data, summary, subject, file_id, chunk_id, chunk_ordinal, type, keywords, timestamp, created_at, metadata
+                FROM memory_memcells
+                WHERE chunk_id = ?
+                ORDER BY timestamp DESC
+                """,
+                (chunk_id,),
+            ).fetchall()
+
+        return [
+            MemCellRecord(
+                id=row["id"],
+                user_id=row["user_id"],
+                original_data=row["original_data"],
+                summary=row["summary"],
+                subject=row["subject"],
+                file_id=row["file_id"],
+                chunk_id=row["chunk_id"],
+                chunk_ordinal=row["chunk_ordinal"],
+                type=row["type"],
+                keywords=json.loads(row["keywords"]) if row["keywords"] else None,
+                timestamp=row["timestamp"],
+                created_at=row["created_at"],
+                metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+            )
+            for row in rows
+        ]
+
+    def get_memcells_by_group_id(self, group_id: str) -> List[MemCellRecord]:
+        """Get MemCells by group_id prefix in chunk_id (e.g., 'email_account::{account_id}' matches chunk_id starting with 'email_account_{account_id}_')."""
+        # Convert group_id format to chunk_id prefix format
+        # group_id: "email_account::{account_id}" -> chunk_id prefix: "email_account_{account_id}_"
+        chunk_prefix = group_id.replace("::", "_") + "_"
+        
+        with self.connect() as conn:
+            self._ensure_memory_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT id, user_id, original_data, summary, subject, file_id, chunk_id, chunk_ordinal, type, keywords, timestamp, created_at, metadata
+                FROM memory_memcells
+                WHERE chunk_id LIKE ?
+                ORDER BY timestamp DESC
+                """,
+                (chunk_prefix + "%",),
+            ).fetchall()
+
+        return [
+            MemCellRecord(
+                id=row["id"],
+                user_id=row["user_id"],
+                original_data=row["original_data"],
+                summary=row["summary"],
+                subject=row["subject"],
+                file_id=row["file_id"],
+                chunk_id=row["chunk_id"],
+                chunk_ordinal=row["chunk_ordinal"],
+                type=row["type"],
+                keywords=json.loads(row["keywords"]) if row["keywords"] else None,
+                timestamp=row["timestamp"],
+                created_at=row["created_at"],
+                metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+            )
+            for row in rows
+        ]
+
+    def get_event_logs_by_episode(self, episode_id: str) -> List[EventLogRecord]:
+        """Get event logs linked to a specific episode."""
+        with self.connect() as conn:
+            self._ensure_memory_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT id, user_id, atomic_fact, timestamp, parent_episode_id, metadata
+                FROM memory_event_logs
+                WHERE parent_episode_id = ?
+                ORDER BY timestamp DESC
+                """,
+                (episode_id,),
+            ).fetchall()
+
+        return [
+            EventLogRecord(
+                id=row["id"],
+                user_id=row["user_id"],
+                atomic_fact=row["atomic_fact"],
+                timestamp=row["timestamp"],
+                parent_episode_id=row["parent_episode_id"],
+                metadata=json.loads(row["metadata"]) if row["metadata"] else None,
+            )
+            for row in rows
+        ]

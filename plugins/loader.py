@@ -38,6 +38,7 @@ class PluginMetadata:
     db_init: Optional[str] = None
     db_migrate: Optional[str] = None
     requirements: Optional[str] = None
+    standalone: bool = False  # If True, plugin runs as standalone server (e.g., MCP)
     
     # Runtime state
     path: Path = field(default_factory=Path)
@@ -60,6 +61,7 @@ class PluginMetadata:
             db_init=backend_config.get("dbInit"),
             db_migrate=backend_config.get("dbMigrate"),
             requirements=backend_config.get("requirements"),
+            standalone=backend_config.get("standalone", False),
             path=plugin_path,
         )
 
@@ -165,6 +167,11 @@ class PluginLoader:
         
         for plugin_id, metadata in self.plugins.items():
             if not metadata.backend_entrypoint:
+                continue
+            
+            # Skip standalone plugins (e.g., MCP server) - they run as separate processes
+            if metadata.standalone:
+                logger.debug(f"Skipping standalone plugin: {metadata.id}")
                 continue
                 
             try:
