@@ -601,7 +601,7 @@ It contains a {mode} mode PyInstaller bundle built for {target_platform}.
 - {'Windows: `run_{mode}.bat`' if target_platform == 'win' else f'{target_platform.capitalize()}: `./run_{mode}.sh`'}
 
 ## Environment Variables
-- LOCAL_SERVICE_BIN_PATH: Root path of all the binary exeution files (local-cocoa-server、llama、whisper)
+- LOCAL_SERVICE_BIN_ROOT: Root path of all the binary exeution files (local-cocoa-server、llama、whisper)
 - LOCAL_SERVICE_LOG_TO_FILE: Whether to log to file (default: True)
 - LOCAL_SERVICE_MAIN_HOST: Host to bind to (default: 127.0.0.1)
 - LOCAL_SERVICE_MAIN_PORT: Port to listen on (default: 8890)

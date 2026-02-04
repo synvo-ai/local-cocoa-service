@@ -133,7 +133,7 @@ class PathSettings(BaseSettings):
     plugins_root: Path = _plugins_root
     user_plugins_root: Optional[Path] = Field(default=None, alias="LOCAL_USER_PLUGINS_ROOT")
 
-    service_bin_path: Path = Field(alias="LOCAL_SERVICE_BIN_PATH")
+    service_bin_root: Path = Field(alias="LOCAL_SERVICE_BIN_ROOT")
     llama_server_path: Path = Field(alias="LOCAL_LLAMA_SERVER_PATH")
     whisper_server_path: Path = Field(alias="LOCAL_WHISPER_SERVER_PATH")
 
@@ -260,13 +260,13 @@ class Settings(BaseSettings):
         must use this post validator to re-calculate derived values when parent values is ready
         """
         runtime_root_str = str(self.paths.runtime_root)
-        service_bin_path_str = str(self.paths.service_bin_path)
+        service_bin_root_str = str(self.paths.service_bin_root)
         main_host_str = str(self.endpoints.main_host)
         
         # Define replacement map
         replacements = {
             "<LOCAL_RUNTIME_ROOT>": runtime_root_str,
-            "<LOCAL_SERVICE_BIN_PATH>": service_bin_path_str,
+            "<LOCAL_SERVICE_BIN_ROOT>": service_bin_root_str,
             "<LOCAL_SERVICE_MAIN_HOST>": main_host_str,
             # Add other base variables here if needed
         }
