@@ -1,8 +1,8 @@
 {
-    "id": "telegram",
-    "name": "Telegram",
+    "id": "synvo_ai_openclaw",
+    "name": "OpenClaw",
     "version": "1.0.0",
-    "description": "Telegram pairing and polling endpoints for OpenClaw panel.",
+    "description": "OpenClaw integration for Synvo AI.",
     "author": "Local Cocoa",
     "category": "integration",
     "icon": "Puzzle",

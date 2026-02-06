@@ -1,5 +1,5 @@
 {
-    "id": "mcp",
+    "id": "synvo_ai_mcp",
     "name": "MCP Server",
     "version": "1.0.0",
     "description": "Model Context Protocol server that enables external AI agents (like Claude Desktop) to access Local Cocoa's knowledge base securely.",

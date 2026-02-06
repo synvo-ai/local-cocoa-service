@@ -6,9 +6,11 @@ import uuid
 from pathlib import Path
 
 from core.config import settings
+from core.context import get_indexer, get_storage
 from services.indexer import Indexer
-from core.models import NoteContent, NoteCreate, NoteRecord, NoteSummary
 from services.storage import IndexStorage
+from .models import NoteContent, NoteCreate, NoteRecord, NoteSummary
+from .storage import NoteMixin
 
 logger = logging.getLogger(__name__)
 
@@ -21,15 +23,17 @@ class NoteNotFound(NotesServiceError):
     """Raised when a requested note cannot be located."""
 
 
-class NotesService:
-    def __init__(self, storage: IndexStorage, indexer: Indexer) -> None:
-        self.storage = storage
+class NotesService(NoteMixin):
+    def __init__(self, indexer: Indexer, plugin_id: str = "") -> None:
+        # Initialize storage via inherited StorageBase
+        super().__init__(plugin_id, db_path=settings.db_path)
+        
         self.indexer = indexer
         self._root = settings.paths.runtime_root / "notes"
         self._root.mkdir(parents=True, exist_ok=True)
 
     def list_notes(self) -> list[NoteSummary]:
-        notes = self.storage.list_notes()
+        notes = self.db_list_notes()
         summaries: list[NoteSummary] = []
         for note in notes:
             preview = self._preview(note.path)
@@ -52,12 +56,12 @@ class NotesService:
         markdown = payload.body if payload.body is not None else ""
         path.write_text(markdown, encoding="utf-8")
         record = NoteRecord(id=identifier, title=title, path=path, created_at=now, updated_at=now)
-        self.storage.upsert_note(record)
+        self.db_upsert_note(record)
         preview = self._preview(path)
         return NoteSummary(id=record.id, title=record.title, updated_at=record.updated_at, preview=preview)
 
     def get_note(self, note_id: str) -> NoteContent:
-        record = self.storage.get_note(note_id)
+        record = self.db_get_note(note_id)
         if not record:
             raise NoteNotFound("Note not found.")
         markdown = self._read(record.path)
@@ -70,7 +74,7 @@ class NotesService:
         )
 
     def update_note(self, note_id: str, payload: NoteCreate) -> NoteContent:
-        record = self.storage.get_note(note_id)
+        record = self.db_get_note(note_id)
         if not record:
             raise NoteNotFound("Note not found.")
         title = self._normalise_title(payload.title) if payload.title is not None else record.title
@@ -83,7 +87,7 @@ class NotesService:
             created_at=record.created_at,
             updated_at=dt.datetime.now(dt.timezone.utc),
         )
-        self.storage.upsert_note(updated)
+        self.db_upsert_note(updated)
         return NoteContent(
             id=updated.id,
             title=updated.title,
@@ -93,16 +97,16 @@ class NotesService:
         )
 
     def delete_note(self, note_id: str) -> None:
-        record = self.storage.get_note(note_id)
+        record = self.db_get_note(note_id)
         if not record:
             raise NoteNotFound("Note not found.")
 
         # Try to clean up vectors if this note was indexed as a file
         try:
-            file_record = self.storage.get_file_by_path(record.path)
+            file_record = self.get_file_by_path(record.path)
             if file_record:
                 self.indexer.vector_store.delete_by_filter(file_id=file_record.id)
-                self.storage.delete_file(file_record.id)
+                self.delete_file(file_record.id)
         except Exception as exc:
             logger.warning("Failed to cleanup vectors for note %s: %s", note_id, exc)
 
@@ -110,7 +114,7 @@ class NotesService:
             record.path.unlink(missing_ok=True)
         except Exception:  # noqa: BLE001
             logger.warning("Failed to delete note file at %s", record.path)
-        self.storage.delete_note(note_id)
+        self.db_delete_note(note_id)
 
     @staticmethod
     def _normalise_title(title: str | None) -> str:
@@ -135,3 +139,29 @@ class NotesService:
             return None
         snippet = [line for line in content.splitlines() if line.strip()][:lines]
         return "\n".join(snippet) if snippet else None
+
+# Lazy initialization of service
+notes_service_global: Optional[NotesService] = None
+
+def get_notes_service() -> NotesService:
+    global notes_service_global
+
+    if notes_service_global is None:
+        raise RuntimeError("Notes service not initialized")
+    return notes_service_global
+
+
+def init_plugin_service(indexer: Indexer, plugin_id: str = "") -> NotesService:
+    global notes_service_global
+    
+    if notes_service_global is None:
+        try:
+            # NotesService now inherits from StorageBase and initializes its own connection
+            notes_service_global = NotesService(indexer, plugin_id)
+        except Exception as e:
+            logger.warning(f"Failed to initialize global notes service: {e}")
+            
+    if notes_service_global:
+        return notes_service_global
+        
+    raise RuntimeError("Notes service not initialized")

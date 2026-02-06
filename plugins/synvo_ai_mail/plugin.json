@@ -1,5 +1,5 @@
 {
-    "id": "mail",
+    "id": "synvo_ai_mail",
     "name": "Email Manager",
     "version": "1.0.0",
     "description": "Connect and manage your email accounts with local indexing.",

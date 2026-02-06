@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from core.config import settings
-from core.context import get_search_engine
+from core.context import get_search_engine,get_indexer, get_storage
 from core.models import QaRequest
 
 logger = logging.getLogger(__name__)
@@ -25,11 +25,11 @@ class TelegramState:
     paired_chat_ids: set[int] = field(default_factory=set)
     last_update_id: int = 0
     poll_interval_seconds: int = 3
-    backend_url: str = "http://127.0.0.1:8890/plugins/telegram"
+    backend_url: str = "http://127.0.0.1:8890/plugins/synvo_ai_telegram"
 
 
 class TelegramService:
-    def __init__(self) -> None:
+    def __init__(self, indexer: Indexer, plugin_id: str = "") -> None:
         self._token_file = settings.paths.runtime_root / "telegram" / "token.txt"
         token = self._load_token()
         self._token = token
@@ -416,5 +416,28 @@ class TelegramService:
                     msg["role"] = "assistant"
                     break
 
+# Lazy initialization of service
+telegram_service_global: Optional[TelegramService] = None
 
-telegram_service = TelegramService()
+
+def get_telegram_service() -> TelegramService:
+    global telegram_service_global
+    
+    if telegram_service_global is None:
+        raise RuntimeError("Telegram service not initialized")
+    return telegram_service_global
+
+def init_plugin_service(indexer: Indexer, plugin_id: str = "") -> TelegramService:
+    global telegram_service_global
+    
+    if telegram_service_global is None:
+        try:
+            telegram_service_global = TelegramService(get_indexer(), plugin_id)
+            asyncio.create_task(telegram_service_global.start())
+        except Exception as e:
+            logger.warning(f"Failed to lazy-initialize global telegram service: {e}")
+            
+    if telegram_service_global:
+        return telegram_service_global
+
+    raise RuntimeError("Telegram service not initialized")

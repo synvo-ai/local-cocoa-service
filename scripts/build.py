@@ -382,6 +382,16 @@ def install_dependencies(venv_python: Path, requirements_path: Path, mode: Build
         else:
             print("Warning: requirements-dev.txt not found - skipping dev dependencies")
 
+    # Dynamic Plugin Dependencies
+    plugins_dir = requirements_path.parent.parent / "plugins"
+    if plugins_dir.exists():
+        for plugin_req in plugins_dir.glob("*/requirements.txt"):
+            run_with_spinner(
+                f"Installing dependencies for plugin: {plugin_req.parent.name}",
+                [str(venv_python), "-m", "pip", "install", "-r", str(plugin_req)],
+                show_output=True
+            )
+
     # Install PyInstaller (version consistent across modes)
     run_with_spinner(
         f"Installing PyInstaller ({mode})",

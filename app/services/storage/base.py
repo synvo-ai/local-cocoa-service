@@ -137,61 +137,6 @@ class StorageBase:
                     DELETE FROM chunks_fts WHERE rowid = OLD.rowid;
                 END;
 
-                CREATE TABLE IF NOT EXISTS email_accounts (
-                    id TEXT PRIMARY KEY,
-                    label TEXT NOT NULL,
-                    protocol TEXT NOT NULL,
-                    host TEXT NOT NULL,
-                    port INTEGER NOT NULL,
-                    username TEXT NOT NULL,
-                    secret TEXT NOT NULL,
-                    use_ssl INTEGER NOT NULL DEFAULT 1,
-                    folder TEXT,
-                    enabled INTEGER NOT NULL DEFAULT 1,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    last_synced_at TEXT,
-                    last_sync_status TEXT,
-                    client_id TEXT,
-                    tenant_id TEXT
-                );
-
-                CREATE TABLE IF NOT EXISTS email_messages (
-                    id TEXT PRIMARY KEY,
-                    account_id TEXT NOT NULL REFERENCES email_accounts(id) ON DELETE CASCADE,
-                    external_id TEXT NOT NULL,
-                    subject TEXT,
-                    sender TEXT,
-                    recipients TEXT,
-                    sent_at TEXT,
-                    stored_path TEXT NOT NULL,
-                    size INTEGER NOT NULL,
-                    created_at TEXT NOT NULL,
-                    UNIQUE(account_id, external_id)
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_email_messages_account ON email_messages(account_id);
-                CREATE INDEX IF NOT EXISTS idx_email_messages_created ON email_messages(created_at);
-
-                CREATE TABLE IF NOT EXISTS notes (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    path TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_notes_updated ON notes(updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS activity_logs (
-                    id TEXT PRIMARY KEY,
-                    timestamp TEXT NOT NULL,
-                    description TEXT NOT NULL,
-                    short_description TEXT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs(timestamp);
-
                 CREATE TABLE IF NOT EXISTS chat_sessions (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -220,12 +165,6 @@ class StorageBase:
                 self._ensure_file_columns(conn)  # type: ignore
             if hasattr(self, "_ensure_chunk_columns"):
                 self._ensure_chunk_columns(conn)  # type: ignore
-            if hasattr(self, "_ensure_email_columns"):
-                self._ensure_email_columns(conn)  # type: ignore
-            if hasattr(self, "_ensure_note_columns"):
-                self._ensure_note_columns(conn)  # type: ignore
-            if hasattr(self, "_ensure_activity_columns"):
-                self._ensure_activity_columns(conn)  # type: ignore
             if hasattr(self, "_ensure_folder_columns"):
                 self._ensure_folder_columns(conn)  # type: ignore
             if hasattr(self, "_ensure_chat_columns"):

@@ -6,9 +6,8 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
-from core.context import get_email_service
-from .service import EmailAccountNotFound, EmailAuthError, EmailService, EmailServiceError, EmailSyncError
-from core.models import (
+from .service import EmailAccountNotFound, EmailAuthError, EmailService, EmailServiceError, EmailSyncError, get_email_service
+from .models import (
     EmailAccountCreate,
     EmailAccountSummary,
     EmailMessageContent,

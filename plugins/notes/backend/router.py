@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
-from core.context import get_notes_service
-from core.models import NoteContent, NoteCreate, NoteSummary
-from .service import NoteNotFound, NotesService, NotesServiceError
+from .models import NoteContent, NoteCreate, NoteSummary
+from .service import NoteNotFound, NotesService, NotesServiceError, get_notes_service
 
 router = APIRouter(tags=["plugin-notes"])
 
