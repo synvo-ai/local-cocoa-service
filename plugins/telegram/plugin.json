@@ -1,0 +1,13 @@
+{
+    "id": "telegram",
+    "name": "Telegram",
+    "version": "1.0.0",
+    "description": "Telegram pairing and polling endpoints for OpenClaw panel.",
+    "author": "Local Cocoa",
+    "category": "integration",
+    "icon": "Puzzle",
+    "backend": {
+        "entrypoint": "router",
+        "requiresDatabase": false
+    }
+}
