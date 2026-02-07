@@ -186,6 +186,13 @@ class PluginLoader:
             except Exception as e:
                 metadata.error = str(e)
                 logger.error(f"Failed to register plugin {plugin_id}: {e}")
+                try:
+                    with open("plugin_errors.log", "a") as f:
+                        import traceback
+                        f.write(f"Failed to register plugin {plugin_id}: {e}\n")
+                        traceback.print_exc(file=f)
+                except:
+                    pass
         
         return registered
     
