@@ -171,12 +171,15 @@ async def on_startup() -> None:
 
 
 @app.on_event("shutdown")
-async def on_shutdown() -> None:
-    global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
+async def on_shutdown():
     # Stop managed models
     from core.model_manager import get_model_manager
     manager = get_model_manager()
-    await manager.stop_all_models()
+    
+    if manager:
+        manager.stop_all_models()
+    
+    print("Shutdown complete")
 
     if _poll_task:
         _poll_task.cancel()

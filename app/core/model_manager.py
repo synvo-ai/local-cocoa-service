@@ -379,7 +379,7 @@ class ModelManager:
                 line = await asyncio.get_event_loop().run_in_executor(None, stream.readline)
                 if not line:
                     break
-                logger.debug(f"[{alias}] {line.strip()}")
+                logger.info(f"[{alias}] {line.strip()}")
 
         if process.stdout:
             asyncio.create_task(read_stream(process.stdout))
