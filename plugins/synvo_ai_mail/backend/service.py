@@ -20,6 +20,7 @@ from markdownify import markdownify
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
 from core.config import settings
+from plugins.plugin_config import load_plugin_config
 from core.context import get_indexer
 from services.indexer import Indexer
 from .models import (
@@ -92,7 +93,8 @@ class EmailService(EmailMixin):
         super().__init__(plugin_id, db_path=settings.db_path)
         
         self.indexer = indexer
-        self._root = settings.paths.runtime_root / "mail"
+        _config = load_plugin_config(__file__)
+        self._root = _config.storage_root
         self._root.mkdir(parents=True, exist_ok=True)
         self._outlook_service = OutlookService()
 

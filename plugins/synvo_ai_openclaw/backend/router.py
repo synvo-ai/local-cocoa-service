@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, FastAPI
 from .service import get_telegram_service
 from .models import PairRequest, TestMessageRequest, TokenRequest
 
 router = APIRouter(tags=["plugin-openclaw"])
 
 
-@router.on_event("shutdown")
-async def _shutdown() -> None:
+async def on_startup(app: FastAPI):
+    """Lifecycle hook called when the plugin is started"""
+    pass
+
+
+async def on_stop(app: FastAPI):
+    """Lifecycle hook called when the plugin is stopped"""
     await get_telegram_service().stop()
 
 

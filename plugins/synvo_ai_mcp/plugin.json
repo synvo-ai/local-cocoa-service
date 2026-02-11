@@ -11,14 +11,6 @@
         "standalone": true,
         "stdio": true
     },
-    "frontend": {
-        "tab": {
-            "id": "connections",
-            "label": "MCP",
-            "icon": "Link2",
-            "component": "MCPConnectionPanel"
-        }
-    },
     "capabilities": [
         "search",
         "ask",
@@ -43,4 +35,3 @@
         }
     ]
 }
-

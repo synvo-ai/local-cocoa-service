@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 from core.config import settings
+from plugins.plugin_config import load_plugin_config
 from core.context import get_indexer, get_storage
 from services.indexer import Indexer
 from services.storage import IndexStorage
@@ -29,7 +30,8 @@ class NotesService(NoteMixin):
         super().__init__(plugin_id, db_path=settings.db_path)
         
         self.indexer = indexer
-        self._root = settings.paths.runtime_root / "notes"
+        _config = load_plugin_config(__file__)
+        self._root = _config.storage_root
         self._root.mkdir(parents=True, exist_ok=True)
 
     def list_notes(self) -> list[NoteSummary]:

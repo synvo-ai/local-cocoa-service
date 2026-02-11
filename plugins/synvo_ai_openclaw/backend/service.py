@@ -12,6 +12,7 @@ from typing import Any
 import httpx
 
 from core.config import settings
+from plugins.plugin_config import load_plugin_config
 from core.context import get_search_engine,get_indexer, get_storage
 from core.models import QaRequest
 
@@ -25,21 +26,28 @@ class TelegramState:
     paired_chat_ids: set[int] = field(default_factory=set)
     last_update_id: int = 0
     poll_interval_seconds: int = 3
-    backend_url: str = "http://127.0.0.1:8890/plugins/synvo_ai_telegram"
+    backend_url: str = ""
+
+
+_plugin_cfg = load_plugin_config(__file__)
 
 
 class TelegramService:
     def __init__(self, indexer: Indexer, plugin_id: str = "") -> None:
-        self._token_file = settings.paths.runtime_root / "telegram" / "token.txt"
+        self._token_file = _plugin_cfg.storage_root / "token.txt"
         token = self._load_token()
         self._token = token
         self._base_url = f"https://api.telegram.org/bot{token}" if token else ""
-        self._state = TelegramState(enabled=bool(token), running=False)
+        self._state = TelegramState(
+            enabled=bool(token),
+            running=False,
+            backend_url=f"http://127.0.0.1:8890{_plugin_cfg.api_prefix}",
+        )
         self._messages: list[dict[str, Any]] = []
         self._lock = asyncio.Lock()
         self._poll_task: asyncio.Task[None] | None = None
         self._client: httpx.AsyncClient | None = None
-        self._state_file = settings.paths.runtime_root / "telegram" / "state.json"
+        self._state_file = _plugin_cfg.storage_root / "state.json"
         self._load_state()
         self._search_engine = get_search_engine()
 

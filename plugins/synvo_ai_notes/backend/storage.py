@@ -98,6 +98,6 @@ class NoteMixin(StorageBase):
             id=row["id"],
             title=row["title"],
             path=Path(row["path"]),
-            created_at=dt.datetime.fromisoformat(row["created_at"]),
-            updated_at=dt.datetime.fromisoformat(row["updated_at"]),
+            created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
+            updated_at=dt.datetime.fromisoformat(row["updated_at"].replace('Z', '+00:00')),
         )

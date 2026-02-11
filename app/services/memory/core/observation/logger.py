@@ -10,6 +10,37 @@ from datetime import datetime
 from .log_sanitizer import SanitizingFormatter
 
 
+class ColoredSanitizingFormatter(SanitizingFormatter):
+    """
+    A logging formatter that adds color to log levels and sanitizes messages.
+    """
+
+    # ANSI escape sequences for colors
+    COLORS = {
+        'DEBUG': '\033[94m',    # Light Blue
+        'INFO': '\033[92m',     # Light Green
+        'WARNING': '\033[93m',  # Light Yellow
+        'ERROR': '\033[91m',    # Light Red
+    }
+    RESET = '\033[0m'
+
+    def format(self, record: logging.LogRecord) -> str:
+        # Save original levelname to restore later
+        orig_levelname = record.levelname
+
+        # Apply color if available for the level
+        if orig_levelname in self.COLORS:
+            color = self.COLORS[orig_levelname]
+            record.levelname = f"{color}{orig_levelname}{self.RESET}"
+
+        try:
+            # Call SanitizingFormatter.format
+            return super().format(record)
+        finally:
+            # Restore original levelname for other handlers
+            record.levelname = orig_levelname
+
+
 class LogLevel(Enum):
     """Log level enumeration"""
 
@@ -43,9 +74,9 @@ class LoggerProvider:
         # Get log level from environment variable, default to INFO
         log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
 
-        # Create sanitizing formatter for privacy protection
-        log_format = '%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
-        sanitizing_formatter = SanitizingFormatter(log_format)
+        # Create colored and sanitizing formatter for privacy protection
+        log_format = '%(asctime)s (%(levelname)s) %(filename)s:%(lineno)d: %(message)s'
+        sanitizing_formatter = ColoredSanitizingFormatter(log_format, datefmt='%m-%d %H:%M:%S')
 
         # Create handler with sanitizing formatter
         console_handler = logging.StreamHandler(sys.stdout)

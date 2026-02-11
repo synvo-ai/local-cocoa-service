@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status, FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
@@ -17,6 +17,16 @@ from .models import (
 )
 
 router = APIRouter(tags=["plugin-mail"])
+
+
+async def on_startup(app: FastAPI):
+    """Lifecycle hook called when the plugin is started"""
+    pass
+
+
+async def on_stop(app: FastAPI):
+    """Lifecycle hook called when the plugin is stopped"""
+    pass
 
 
 # ==================== Account-Level Memory Integration Models (v2.5) ====================

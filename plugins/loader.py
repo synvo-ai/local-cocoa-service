@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import asyncio
 import importlib
 import importlib.util
 from pathlib import Path
@@ -44,6 +45,9 @@ class PluginMetadata:
     path: Path = field(default_factory=Path)
     loaded: bool = False
     error: Optional[str] = None
+    
+    # Lifecycle handlers
+    module: Any = None # Loaded module reference
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any], plugin_path: Path) -> "PluginMetadata":
@@ -98,6 +102,36 @@ class PluginLoader:
         
         logger.info(f"PluginLoader initialized. Plugins directory: {self.plugins_path_list}")
     
+    async def run_on_startup(self, app: "FastAPI"):
+        """Call on_startup hooks for all loaded plugins"""
+        for plugin_id, metadata in self.plugins.items():
+            if metadata.loaded and metadata.module:
+                on_startup = getattr(metadata.module, "on_startup", None)
+                if on_startup and callable(on_startup):
+                    try:
+                        logger.debug(f"Calling on_startup for plugin {plugin_id}")
+                        if asyncio.iscoroutinefunction(on_startup):
+                            await on_startup(app)
+                        else:
+                            on_startup(app)
+                    except Exception as e:
+                        logger.error(f"Error in on_startup for plugin {plugin_id}: {e}")
+
+    async def run_on_stop(self, app: "FastAPI"):
+        """Call on_stop hooks for all loaded plugins"""
+        for plugin_id, metadata in self.plugins.items():
+            if metadata.loaded and metadata.module:
+                on_stop = getattr(metadata.module, "on_stop", None)
+                if on_stop and callable(on_stop):
+                    try:
+                        logger.debug(f"Calling on_stop for plugin {plugin_id}")
+                        if asyncio.iscoroutinefunction(on_stop):
+                            await on_stop(app)
+                        else:
+                            on_stop(app)
+                    except Exception as e:
+                        logger.error(f"Error in on_stop for plugin {plugin_id}: {e}")
+    
     def discover_plugins(self) -> List[PluginMetadata]:
         """
         Discover all available plugins in the plugins/ directory.
@@ -113,7 +147,7 @@ class PluginLoader:
                 continue
             
             for plugin_dir in plugins_path.iterdir():
-                if plugin_dir.is_dir():
+                if plugin_dir.is_dir() and not plugin_dir.name.startswith('__'):
                     metadata = self._load_plugin_metadata(plugin_dir)
                     if metadata:
                         discovered.append(metadata)
@@ -265,6 +299,9 @@ class PluginLoader:
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
             
+            # Store module reference for lifecycle hooks
+            metadata.module = module
+            
             # Get the router from the module
             router = getattr(module, "router", None)
             if router is None:
@@ -365,6 +402,7 @@ class PluginLoader:
             del app.router.routes[i]
         
         metadata.loaded = False
+        metadata.module = None
         logger.info(f"Unloaded plugin: {plugin_id} (removed {len(routes_to_remove)} routes)")
         return True
     
@@ -583,6 +621,10 @@ def init_all_plugins(app: "FastAPI"):
         # Load plugin services
         from core.context import indexer
         services_count = plugin_loader.register_all_services(indexer)
+        
+        # Run startup hooks
+        import asyncio
+        asyncio.create_task(plugin_loader.run_on_startup(app))
         
         logger.info(f"Plugin system initialized: {registered_count} routers, {services_count} services loaded")
     except Exception as e:

@@ -57,8 +57,8 @@ class ChatMixin:
             return ChatSession(
                 id=row["id"],
                 title=row["title"],
-                created_at=dt.datetime.fromisoformat(row["created_at"]),
-                updated_at=dt.datetime.fromisoformat(row["updated_at"]),
+                created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
+                updated_at=dt.datetime.fromisoformat(row["updated_at"].replace('Z', '+00:00')),
                 messages=messages,
             )
 
@@ -80,8 +80,8 @@ class ChatMixin:
                 sessions.append(ChatSession(
                     id=row["id"],
                     title=row["title"],
-                    created_at=dt.datetime.fromisoformat(row["created_at"]),
-                    updated_at=dt.datetime.fromisoformat(row["updated_at"]),
+                    created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
+                    updated_at=dt.datetime.fromisoformat(row["updated_at"].replace('Z', '+00:00')),
                     messages=messages,
                 ))
             return sessions
@@ -129,7 +129,7 @@ class ChatMixin:
             session_id=row["session_id"],
             role=row["role"],
             content=row["content"],
-            timestamp=dt.datetime.fromisoformat(row["timestamp"]),
+            timestamp=dt.datetime.fromisoformat(row["timestamp"].replace('Z', '+00:00')),
             meta=row["meta"],
             references=ChatMixin._deserialize_references(row["references"]),
             is_multi_path=is_multi_path,

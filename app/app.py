@@ -141,6 +141,9 @@ async def _staged_scheduler_loop(max_wait: int = 60) -> None:
 
 @app.on_event("startup")
 async def on_startup() -> None:
+    logger.info(f"Resource root (external): {settings.paths.resource_root}")
+    logger.info(f"Bundle root (internal): {settings.paths.bundle_root}")
+
     global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
     # Initialize plugin system and load plugins at startup. Ensures plugin routes are available before the first request
     init_all_plugins(app)
@@ -179,8 +182,15 @@ async def on_shutdown():
     if manager:
         manager.stop_all_models()
     
-    print("Shutdown complete")
+    # Stop plugins
+    from plugins.loader import get_plugin_loader
+    loader = get_plugin_loader()
+    if loader:
+        await loader.run_on_stop(app)
 
+    logger.info("Shutdown complete")
+
+    global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
     if _poll_task:
         _poll_task.cancel()
         try:
