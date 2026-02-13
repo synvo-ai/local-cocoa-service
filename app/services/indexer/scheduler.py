@@ -16,9 +16,11 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+from collections import deque
+from pathlib import Path
 from typing import Optional
 
-from core.models import IndexProgress
+from core.models import IndexProgress, infer_kind
 from services.storage import IndexStorage
 from .stages import FastTextProcessor, FastEmbedProcessor, DeepProcessor
 from .state import StateManager
@@ -191,6 +193,9 @@ class TwoRoundScheduler:
             failed=0,
         )
 
+        # ── Populate pending_paths from DB so the queue is visible in UI ──
+        self._populate_pending_paths(folder_id)
+
         try:
             while not self._cancel_requested:
                 if max_iterations and iterations >= max_iterations:
@@ -230,8 +235,54 @@ class TwoRoundScheduler:
 
         finally:
             self._running = False
+            self.state.reset_active_state()
+            self.state.pending_paths.clear()
 
         return self.state.progress
+
+    # ── Helpers for UI progress tracking ─────────────────────────────
+
+    def _populate_pending_paths(self, folder_id: Optional[str] = None) -> None:
+        """Populate state.pending_paths from DB so the queue shows in the UI."""
+        self.state.pending_paths.clear()
+        # Gather all files that still need processing
+        pending_fast = self.storage.list_files_by_stage(
+            fast_stage=0, limit=10000, folder_id=folder_id
+        )
+        pending_embed = self.storage.list_files_by_stage(
+            fast_stage=1, limit=10000, folder_id=folder_id
+        )
+        pending_deep = self.storage.list_files_by_stage(
+            fast_stage_gte=2, deep_stage=0, limit=10000, folder_id=folder_id
+        )
+        for record in (*pending_fast, *pending_embed, *pending_deep):
+            fid = record.folder_id
+            if fid not in self.state.pending_paths:
+                self.state.pending_paths[fid] = deque()
+            p = Path(record.path) if isinstance(record.path, str) else record.path
+            # Avoid duplicates (same file may appear in multiple queries if stages overlap)
+            if p not in self.state.pending_paths[fid]:
+                self.state.pending_paths[fid].append(p)
+
+    def _set_active(self, file_record, stage: str) -> None:
+        """Set the currently-processing file for UI visibility."""
+        p = Path(file_record.path) if isinstance(file_record.path, str) else file_record.path
+        self.state.set_active_file(
+            folder_id=file_record.folder_id,
+            file_path=p,
+            file_name=file_record.name,
+            kind=file_record.kind or (infer_kind(p) if p else None),
+        )
+        self.state.set_active_stage(stage=stage)
+        # Remove from pending queue
+        fid = file_record.folder_id
+        if fid in self.state.pending_paths:
+            try:
+                self.state.pending_paths[fid].remove(p)
+            except ValueError:
+                pass
+            if not self.state.pending_paths[fid]:
+                del self.state.pending_paths[fid]
 
     async def _process_one_round(self, folder_id: Optional[str] = None) -> bool:
         """Process one round of work following strict priority.
@@ -255,14 +306,14 @@ class TwoRoundScheduler:
                         return False
                     await self.state.pause_event.wait()
                     
-                    # Pass file_record directly to avoid redundant DB lookup
-                    # and prevent race condition with concurrent file pruning
+                    self._set_active(file_record, "fast_text")
                     success = await self.fast_text.process(file_record.id, file_record=file_record)
                     if success:
                         self.state.progress.processed += 1
                     else:
                         self.state.progress.failed += 1
                 
+                self.state.reset_active_state()
                 return True  # Work was done, check priority again
 
         # ═══════════════════════════════════════════════════════════════
@@ -292,12 +343,25 @@ class TwoRoundScheduler:
                         return False
                     await self.state.pause_event.wait()
                     
+                    # Set active file to the first file in batch for UI
+                    self._set_active(ready[0], "fast_embed")
+                    
                     # Use batch processing for better GPU utilization
-                    # This collects all chunks from multiple files and embeds them together
                     file_ids = [f.id for f in ready]
                     success_count = await self.fast_embed.process_batch(file_ids)
                     self.state.progress.processed += success_count
                     
+                    # Remove remaining batch files from pending
+                    for f in ready[1:]:
+                        p = Path(f.path) if isinstance(f.path, str) else f.path
+                        fid = f.folder_id
+                        if fid in self.state.pending_paths:
+                            try:
+                                self.state.pending_paths[fid].remove(p)
+                            except ValueError:
+                                pass
+                    
+                    self.state.reset_active_state()
                     return True  # Work was done
 
         # ═══════════════════════════════════════════════════════════════
@@ -331,19 +395,19 @@ class TwoRoundScheduler:
 
         # ═══════════════════════════════════════════════════════════════
         # Priority 3: Deep Processing (one file at a time)
-        # Deep only needs Fast Text complete, not Fast Embed (Semantic)
+        # Deep requires fast_stage >= 2 (fast text + fast embed complete)
+        # because it reads fast-round chunks for memory extraction.
         # ═══════════════════════════════════════════════════════════════
         if not self.paused["deep"]:
-            # Check if there are files pending Fast Text (must complete first)
+            # Check if there are files still in fast pipeline (stages 0 or 1)
             pending_fast = self.storage.list_files_by_stage(
                 fast_stage=0, limit=1, folder_id=folder_id
             )
 
-            # Only proceed to deep if Fast Text is complete for all files
-            # Deep does NOT depend on Fast Embed (Semantic) - it generates its own embeddings
+            # Only proceed to deep if no files are waiting for fast text
             if not pending_fast:
                 ready = self.storage.list_files_by_stage(
-                    fast_stage_gte=1,  # Fast Text complete (stage >= 1)
+                    fast_stage_gte=2,  # Both fast text + fast embed complete
                     deep_stage=0,  # Deep not started
                     limit=1,
                     folder_id=folder_id,
@@ -354,13 +418,17 @@ class TwoRoundScheduler:
                     logger.info("Processing %s for deep", file_record.name)
                     
                     await self.state.pause_event.wait()
-                    # Pass file_record directly to avoid redundant DB lookup
+                    self._set_active(file_record, "deep")
                     success = await self.deep.process(file_record.id, file_record=file_record)
                     
                     if success:
                         self.state.progress.processed += 1
+                    else:
+                        # Deep rejected the file (e.g. stage mismatch) — don't spin
+                        logger.warning("Deep processing returned False for %s", file_record.name)
                     
-                    return True  # Work was done
+                    self.state.reset_active_state()
+                    return True  # Slot was consumed, re-evaluate priorities
 
         # No work found in any stage
         return False
@@ -379,6 +447,8 @@ class TwoRoundScheduler:
         fast_embed_done = counts.get("fast_embed_done", 0)
         deep_done = counts.get("deep_embed_done", 0)
         deep_skipped = counts.get("deep_skipped", 0)
+        deep_error = counts.get("deep_error", 0)
+        deep_terminal = deep_done + deep_skipped + deep_error  # all non-pending files
         
         return {
             "total": total,
@@ -396,11 +466,11 @@ class TwoRoundScheduler:
                 "enabled": not self.paused["fast_embed"],  # Whether Semantic is enabled
             },
             "deep": {
-                "pending": total - deep_done - deep_skipped - counts.get("deep_error", 0),
+                "pending": total - deep_terminal,
                 "done": deep_done,
                 "skipped": deep_skipped,
-                "error": counts.get("deep_error", 0),
-                "percent": ((deep_done + deep_skipped) / total * 100) if total > 0 else 0,
+                "error": deep_error,
+                "percent": (deep_terminal / total * 100) if total > 0 else 0,
                 "enabled": not self.paused["deep"],  # Whether Deep is enabled
             },
             "paused": dict(self.paused),

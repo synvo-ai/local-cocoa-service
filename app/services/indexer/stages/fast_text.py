@@ -105,8 +105,10 @@ class FastTextProcessor:
 
         path = file_record.path
         if not path.exists():
-            logger.warning("File path does not exist: %s", path)
+            reason = f"File no longer exists: {path}"
+            logger.warning(reason)
             self.storage.update_file_stage(file_id, fast_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         try:
@@ -218,8 +220,14 @@ class FastTextProcessor:
             return True
 
         except Exception as exc:
-            logger.warning("Fast text failed for %s: %s", file_id, exc)
+            reason = f"Fast text failed: {type(exc).__name__}: {exc}"
+            logger.error(
+                "Fast text failed for %s (%s): %s",
+                file_id, file_record.name if file_record else file_id, exc,
+                exc_info=True,
+            )
             self.storage.update_file_stage(file_id, fast_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         finally:

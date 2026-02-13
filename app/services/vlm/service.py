@@ -279,5 +279,5 @@ class VisionProcessor:
         except Exception as e:
             msg = str(e) or repr(e)
             self.last_error = msg
-            logger.warning("VLM description failed: %s", msg)
+            logger.error("VLM description failed: %s", msg, exc_info=True)
             return ""
