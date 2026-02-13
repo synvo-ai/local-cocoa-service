@@ -56,8 +56,6 @@ def main():
     if str(project_root) not in sys.path:
         sys.path.insert(0, str(project_root))
 
-    print(f"[info] Project root: {project_root}, Frozen: {getattr(sys, 'frozen', False)}")
-
     from app.core.config import settings
 
     if settings.is_dev and not getattr(sys, 'frozen', False):  # Only reload when not frozen and in debug mode

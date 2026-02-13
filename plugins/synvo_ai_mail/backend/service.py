@@ -20,8 +20,10 @@ from markdownify import markdownify
 from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
 from core.config import settings
+from plugins.plugin_config import load_plugin_config
+from core.context import get_indexer
 from services.indexer import Indexer
-from core.models import (
+from .models import (
     EmailAccount,
     EmailAccountCreate,
     EmailAccountSummary,
@@ -30,9 +32,10 @@ from core.models import (
     EmailMessageContent,
     EmailSyncRequest,
     EmailSyncResult,
-    FolderRecord,
 )
+from core.models import FolderRecord
 from services.storage import IndexStorage
+from .storage import EmailMixin
 from .outlook import (
     OUTLOOK_DEFAULT_CLIENT_ID,
     OUTLOOK_DEFAULT_TENANT_ID,
@@ -55,7 +58,6 @@ logger = logging.getLogger(__name__)
 # Azure Identity's device-code flow legitimately receives 400 responses while waiting
 # (e.g., "authorization_pending"). Keep the low-level HTTP logs quieter.
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(logging.WARNING)
-
 
 
 # Use MSAL-friendly delegated scopes (do not include reserved values like offline_access).
@@ -83,13 +85,16 @@ class EmailAccountNotFound(EmailServiceError):
     """Raised when an email account is missing."""
 
 
-class EmailService:
+class EmailService(EmailMixin):
     MAX_SYNC_BATCH = 100
 
-    def __init__(self, storage: IndexStorage, indexer: Indexer) -> None:
-        self.storage = storage
+    def __init__(self, indexer: Indexer, plugin_id: str = "") -> None:
+        # Initialize storage via inherited StorageBase
+        super().__init__(plugin_id, db_path=settings.db_path)
+        
         self.indexer = indexer
-        self._root = settings.paths.runtime_root / "mail"
+        _config = load_plugin_config(__file__)
+        self._root = _config.storage_root
         self._root.mkdir(parents=True, exist_ok=True)
         self._outlook_service = OutlookService()
 
@@ -128,15 +133,15 @@ class EmailService:
             tenant_id=details["tenant_id"]
         )
 
-        self.storage.upsert_email_account(account)
+        self.upsert_email_account(account)
         folder_path = self._ensure_account_folder(account)
         return self._to_summary(account, folder_path)
 
     def list_accounts(self) -> list[EmailAccountSummary]:
         summaries: list[EmailAccountSummary] = []
-        accounts = self.storage.list_email_accounts()
+        accounts = self.list_email_accounts()
         for account in accounts:
-            removed = self.storage.prune_missing_email_messages(account.id)
+            removed = self.prune_missing_email_messages(account.id)
             if removed:
                 logger.info("Pruned %d orphaned email message records for %s", removed, account.label)
             folder_path = self._ensure_account_folder(account)
@@ -166,16 +171,16 @@ class EmailService:
             last_sync_status=None,
         )
 
-        for existing in self.storage.list_email_accounts():
+        for existing in self.list_email_accounts():
             if existing.username == account.username and existing.host == account.host:
                 raise EmailServiceError("An account with the same host and username already exists.")
 
-        self.storage.upsert_email_account(account)
+        self.upsert_email_account(account)
         folder_path = self._ensure_account_folder(account)
         return self._to_summary(account, folder_path)
 
     def remove_account(self, account_id: str) -> None:
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         folder_path = self._account_spool_path(account.id)
@@ -194,18 +199,18 @@ class EmailService:
         # The schema says: folder_id TEXT NOT NULL REFERENCES folders(id) ON DELETE CASCADE
         # So deleting the folder should cascade to files.
 
-        self.storage.delete_email_account(account_id)
+        self.delete_email_account(account_id)
 
         # Also remove the folder record from storage if it exists
         # This triggers the ON DELETE CASCADE for files and chunks
-        if self.storage.get_folder(folder_id):
-            self.storage.remove_folder(folder_id)
+        if self.get_folder(folder_id):
+            self.remove_folder(folder_id)
 
         if folder_path.exists():
             shutil.rmtree(folder_path, ignore_errors=True)
 
     async def sync_account(self, account_id: str, request: EmailSyncRequest) -> EmailSyncResult:
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
 
@@ -218,12 +223,12 @@ class EmailService:
             batch_limit = self._sanitize_limit(request.limit)
             result = await asyncio.to_thread(self._sync_account_blocking, account, batch_limit, folder_path)
         except EmailSyncError as exc:
-            self.storage.update_email_account_sync(
+            self.update_email_account_sync(
                 account.id, last_synced_at=dt.datetime.now(dt.timezone.utc), status=f"error: {exc}")
             raise
         except Exception as exc:  # noqa: BLE001
             logger.exception("Unexpected email sync failure for %s", account.id)
-            self.storage.update_email_account_sync(
+            self.update_email_account_sync(
                 account.id, last_synced_at=dt.datetime.now(dt.timezone.utc), status=f"error: {exc}")
             raise EmailSyncError("Unexpected failure while syncing account.") from exc
 
@@ -233,17 +238,17 @@ class EmailService:
         else:
             result.indexed = 0
 
-        self.storage.update_email_account_sync(account.id, last_synced_at=result.last_synced_at, status=result.status)
+        self.update_email_account_sync(account.id, last_synced_at=result.last_synced_at, status=result.status)
         return result
 
     async def _sync_outlook(self, account: EmailAccount, request: EmailSyncRequest, folder_path: Path) -> EmailSyncResult:
         try:
             if not (account.client_id or "").strip():
                 account.client_id = OUTLOOK_DEFAULT_CLIENT_ID
-                self.storage.upsert_email_account(account)
+                self.upsert_email_account(account)
             if not (account.tenant_id or "").strip():
                 account.tenant_id = OUTLOOK_DEFAULT_TENANT_ID
-                self.storage.upsert_email_account(account)
+                self.upsert_email_account(account)
 
             logger.info(
                 "Syncing Outlook account %s client_id=%s tenant_id=%s",
@@ -268,7 +273,7 @@ class EmailService:
             except OutlookServiceError as e:
                 raise EmailSyncError(str(e)) from e
 
-            existing_ids = set(self.storage.list_email_message_ids(account.id))
+            existing_ids = set(self.list_email_message_ids(account.id))
             new_records = []
 
             for msg in messages:
@@ -329,16 +334,16 @@ class EmailService:
 
             new_count = len(new_records)
             for record in new_records:
-                self.storage.record_email_message(record)
+                self.record_email_message(record)
 
             if new_count > 0:
                 await self.indexer.refresh(folders=[self._folder_id(account)])
 
-            total_messages = self.storage.count_email_messages(account.id)
+            total_messages = self.count_email_messages(account.id)
             last_synced = dt.datetime.now(dt.timezone.utc)
             message = "No new messages." if new_count == 0 else f"Fetched {new_count} message{'s' if new_count != 1 else ''}."
 
-            self.storage.update_email_account_sync(account.id, last_synced_at=last_synced, status="ok")
+            self.update_email_account_sync(account.id, last_synced_at=last_synced, status="ok")
 
             return EmailSyncResult(
                 account_id=account.id,
@@ -353,7 +358,7 @@ class EmailService:
             )
 
         except EmailSyncError as exc:
-            self.storage.update_email_account_sync(
+            self.update_email_account_sync(
                 account.id,
                 last_synced_at=dt.datetime.now(dt.timezone.utc),
                 status=f"error: {exc}",
@@ -361,7 +366,7 @@ class EmailService:
             raise
         except (ClientAuthenticationError, HttpResponseError) as exc:
             logger.exception("Outlook sync auth failed")
-            self.storage.update_email_account_sync(
+            self.update_email_account_sync(
                 account.id,
                 last_synced_at=dt.datetime.now(dt.timezone.utc),
                 status=f"error: {exc}",
@@ -369,7 +374,7 @@ class EmailService:
             raise EmailAuthError(str(exc)) from exc
         except Exception as exc:
             logger.exception("Outlook sync failed")
-            self.storage.update_email_account_sync(
+            self.update_email_account_sync(
                 account.id,
                 last_synced_at=dt.datetime.now(dt.timezone.utc),
                 status=f"error: {exc}",
@@ -377,10 +382,10 @@ class EmailService:
             raise EmailSyncError(f"Outlook sync failed: {exc}") from exc
 
     def list_messages(self, account_id: str, limit: int) -> list[EmailMessageSummary]:
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
-        records = self.storage.list_email_messages(account_id, limit)
+        records = self.list_email_messages(account_id, limit)
         summaries: list[EmailMessageSummary] = []
         for record in records:
             summary = self._record_to_summary(record)
@@ -389,7 +394,7 @@ class EmailService:
         return summaries
 
     def get_message(self, message_id: str) -> EmailMessageContent:
-        record = self.storage.get_email_message(message_id)
+        record = self.get_email_message(message_id)
         if not record:
             raise EmailServiceError("Email message not found.")
         markdown = self._read_markdown(record.stored_path)
@@ -400,7 +405,7 @@ class EmailService:
 
     def _sync_account_blocking(self, account: EmailAccount, limit: int, folder_path: Path) -> EmailSyncResult:
         secret = self._decode_secret(account.secret)
-        existing_ids = set(self.storage.list_email_message_ids(account.id))
+        existing_ids = set(self.list_email_message_ids(account.id))
         if account.protocol == "imap":
             new_records = self._sync_imap(account, secret, folder_path, existing_ids, limit)
         elif account.protocol == "pop3":
@@ -410,12 +415,12 @@ class EmailService:
 
         new_count = len(new_records)
         for record in new_records:
-            self.storage.record_email_message(record)
+            self.record_email_message(record)
 
-        removed = self.storage.prune_missing_email_messages(account.id)
+        removed = self.prune_missing_email_messages(account.id)
         if removed:
             logger.info("Pruned %d orphaned email message records for %s", removed, account.label)
-        total_messages = self.storage.count_email_messages(account.id)
+        total_messages = self.count_email_messages(account.id)
         last_synced = dt.datetime.now(dt.timezone.utc)
         message = "No new messages." if new_count == 0 else f"Fetched {new_count} message{'s' if new_count != 1 else ''}."
 
@@ -590,7 +595,7 @@ class EmailService:
         folder_path = self._account_spool_path(account.id)
         folder_path.mkdir(parents=True, exist_ok=True)
 
-        existing = self.storage.get_folder(self._folder_id(account))
+        existing = self.get_folder(self._folder_id(account))
         now = dt.datetime.now(dt.timezone.utc)
         if existing:
             record = FolderRecord(
@@ -612,13 +617,13 @@ class EmailService:
                 last_indexed_at=None,
                 enabled=True,
             )
-        self.storage.upsert_folder(record)
+        self.upsert_folder(record)
         return folder_path
 
     def _to_summary(self, account: EmailAccount, folder_path: Path) -> EmailAccountSummary:
         window = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=24)
-        total_messages = self.storage.count_email_messages(account.id)
-        recent_new = self.storage.count_email_messages_since(account.id, window)
+        total_messages = self.count_email_messages(account.id)
+        recent_new = self.count_email_messages_since(account.id, window)
         return EmailAccountSummary(
             id=account.id,
             label=account.label,
@@ -838,12 +843,12 @@ class EmailService:
         import json
         from datetime import datetime, timezone
         
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
         # 获取该账户下所有邮件
-        messages = self.storage.list_email_messages(account_id, limit=1000)
+        messages = self.list_email_messages(account_id, limit=1000)
         if not messages:
             return {
                 "success": True,
@@ -1039,12 +1044,12 @@ class EmailService:
         import json
         from datetime import datetime, timezone
         
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
         # 获取该账户下所有邮件
-        messages = self.storage.list_email_messages(account_id, limit=1000)
+        messages = self.list_email_messages(account_id, limit=1000)
         total_count = len(messages)
         
         # 初始进度
@@ -1138,7 +1143,7 @@ class EmailService:
                     markdown = self._read_markdown(record.stored_path)
                 except Exception as e:
                     # 记录失败状态
-                    self.storage.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
+                    self.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
                     yield {
                         "type": "email_error",
                         "current": idx + 1,
@@ -1277,12 +1282,12 @@ class EmailService:
                 except Exception as e:
                     logger.warning("Episode extraction failed for email %s: %s", record.id, e)
                     # Episode 提取失败，记录为失败状态
-                    self.storage.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
+                    self.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
                     email_result["error"] = str(e)
                 
                 # 如果没有错误，标记为成功
                 if "error" not in email_result:
-                    self.storage.update_email_memory_status(record.id, 'success')
+                    self.update_email_memory_status(record.id, 'success')
                 
                 # 单封邮件处理完成
                 yield {
@@ -1331,12 +1336,12 @@ class EmailService:
         import hashlib
         from datetime import datetime, timezone
         
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
         # 获取邮件记录
-        record = self.storage.get_email_message(message_id)
+        record = self.get_email_message(message_id)
         if not record:
             yield {
                 "type": "error",
@@ -1372,7 +1377,7 @@ class EmailService:
             try:
                 markdown = self._read_markdown(record.stored_path)
             except Exception as e:
-                self.storage.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
+                self.update_email_memory_status(record.id, 'failed', f"Failed to read email: {str(e)}")
                 yield {
                     "type": "error",
                     "message_id": message_id,
@@ -1507,7 +1512,7 @@ class EmailService:
                         
             except Exception as e:
                 logger.warning("Episode extraction failed for email %s: %s", record.id, e)
-                self.storage.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
+                self.update_email_memory_status(record.id, 'failed', f"Episode extraction failed: {str(e)}")
                 yield {
                     "type": "error",
                     "message_id": message_id,
@@ -1516,7 +1521,7 @@ class EmailService:
                 return
             
             # 标记为成功
-            self.storage.update_email_memory_status(record.id, 'success')
+            self.update_email_memory_status(record.id, 'success')
             
             yield {
                 "type": "complete",
@@ -1530,7 +1535,7 @@ class EmailService:
             
         except Exception as e:
             logger.error("Failed to retry email %s: %s", message_id, e)
-            self.storage.update_email_memory_status(record.id, 'failed', str(e))
+            self.update_email_memory_status(record.id, 'failed', str(e))
             yield {
                 "type": "error",
                 "message_id": message_id,
@@ -1539,7 +1544,7 @@ class EmailService:
 
     async def get_account_memory_status(self, account_id: str, user_id: str) -> dict:
         """获取邮箱账户的 Memory 状态"""
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
@@ -1616,7 +1621,7 @@ class EmailService:
         Returns:
             QA 结果 dict
         """
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
@@ -1725,7 +1730,7 @@ class EmailService:
         Returns:
             包含 memcells、episodes、facts 列表的 dict
         """
-        account = self.storage.get_email_account(account_id)
+        account = self.get_email_account(account_id)
         if not account:
             raise EmailAccountNotFound("Email account not found.")
         
@@ -1820,3 +1825,28 @@ class EmailService:
                 "total_episodes": 0,
                 "total_facts": 0,
             }
+
+# Lazy initialization of service
+email_service_global: Optional[EmailService] = None
+
+def get_email_service() -> EmailService:
+    global email_service_global
+
+    if email_service_global is None:
+        raise RuntimeError("Email service not initialized")
+    return email_service_global
+
+def init_plugin_service(indexer: Indexer, plugin_id: str = "") -> EmailService:
+    global email_service_global
+    
+    if email_service_global is None:
+        try:
+            # EmailService now inherits from StorageBase and initializes its own connection
+            email_service_global = EmailService(indexer, plugin_id)
+        except Exception as e:
+            logger.warning(f"Failed to initialize global email service: {e}")
+            
+    if email_service_global:
+        return email_service_global
+
+    raise RuntimeError("Email service not initialized")

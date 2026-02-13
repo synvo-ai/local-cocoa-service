@@ -13,6 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import sys
 
+logger = logging.getLogger(__name__)
+
 # Determine resource roots for finding bundled files vs external config (PyInstaller compatible)
 def _get_resource_root() -> Path:
     """Returns the directory containing the executable or the script."""
@@ -29,7 +31,6 @@ def _get_bundle_root() -> Path:
         return Path(sys._MEIPASS)
     # Running from source
     return Path(__file__).resolve().parent.parent.parent
-
 
 def _get_plugins_root() -> Path:
     # Add plugins directory to path for importing plugin services
@@ -56,9 +57,6 @@ def _get_plugins_root() -> Path:
 _resource_root = _get_resource_root()
 _bundle_root = _get_bundle_root()
 _plugins_root = _get_plugins_root()
-
-print(f"[config] Resource root (external): {str(_resource_root)}")
-print(f"[config] Bundle root (internal): {str(_bundle_root)}")
 
 # Determine environment mode (e.g., 'dev', 'prod', 'test')
 # Default to 'dev' if ENV system environment variable is not set
@@ -326,7 +324,7 @@ class Settings(BaseSettings):
             with open(self.settings_path, 'w') as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to save settings: {e}")
+            logger.error(f"Failed to save settings: {e}")
 
     def load_from_file(self):
         import json
@@ -339,7 +337,7 @@ class Settings(BaseSettings):
                     if hasattr(self, key):
                         setattr(self, key, value)
         except Exception as e:
-            logging.getLogger(__name__).error(f"Failed to load settings: {e}")
+            logger.error(f"Failed to load settings: {e}")
 
 
 @lru_cache(maxsize=1)

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status, FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Optional, List
 
-from core.context import get_email_service
-from .service import EmailAccountNotFound, EmailAuthError, EmailService, EmailServiceError, EmailSyncError
-from core.models import (
+from .service import EmailAccountNotFound, EmailAuthError, EmailService, EmailServiceError, EmailSyncError, get_email_service
+from .models import (
     EmailAccountCreate,
     EmailAccountSummary,
     EmailMessageContent,
@@ -18,6 +17,16 @@ from core.models import (
 )
 
 router = APIRouter(tags=["plugin-mail"])
+
+
+async def on_startup(app: FastAPI):
+    """Lifecycle hook called when the plugin is started"""
+    pass
+
+
+async def on_stop(app: FastAPI):
+    """Lifecycle hook called when the plugin is stopped"""
+    pass
 
 
 # ==================== Account-Level Memory Integration Models (v2.5) ====================

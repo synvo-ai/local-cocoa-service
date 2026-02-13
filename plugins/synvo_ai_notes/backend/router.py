@@ -1,12 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status, FastAPI
 
-from core.context import get_notes_service
-from core.models import NoteContent, NoteCreate, NoteSummary
-from .service import NoteNotFound, NotesService, NotesServiceError
+from .models import NoteContent, NoteCreate, NoteSummary
+from .service import NoteNotFound, NotesService, NotesServiceError, get_notes_service
 
 router = APIRouter(tags=["plugin-notes"])
+
+
+async def on_startup(app: FastAPI):
+    """Lifecycle hook called when the plugin is started"""
+    pass
+
+
+async def on_stop(app: FastAPI):
+    """Lifecycle hook called when the plugin is stopped"""
+    pass
 
 
 @router.get("", response_model=list[NoteSummary])

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import sys
+import asyncio
 import importlib
 import importlib.util
 from pathlib import Path
@@ -44,6 +45,9 @@ class PluginMetadata:
     path: Path = field(default_factory=Path)
     loaded: bool = False
     error: Optional[str] = None
+    
+    # Lifecycle handlers
+    module: Any = None # Loaded module reference
     
     @classmethod
     def from_dict(cls, data: Dict[str, Any], plugin_path: Path) -> "PluginMetadata":
@@ -98,6 +102,36 @@ class PluginLoader:
         
         logger.info(f"PluginLoader initialized. Plugins directory: {self.plugins_path_list}")
     
+    async def run_on_startup(self, app: "FastAPI"):
+        """Call on_startup hooks for all loaded plugins"""
+        for plugin_id, metadata in self.plugins.items():
+            if metadata.loaded and metadata.module:
+                on_startup = getattr(metadata.module, "on_startup", None)
+                if on_startup and callable(on_startup):
+                    try:
+                        logger.debug(f"Calling on_startup for plugin {plugin_id}")
+                        if asyncio.iscoroutinefunction(on_startup):
+                            await on_startup(app)
+                        else:
+                            on_startup(app)
+                    except Exception as e:
+                        logger.error(f"Error in on_startup for plugin {plugin_id}: {e}")
+
+    async def run_on_stop(self, app: "FastAPI"):
+        """Call on_stop hooks for all loaded plugins"""
+        for plugin_id, metadata in self.plugins.items():
+            if metadata.loaded and metadata.module:
+                on_stop = getattr(metadata.module, "on_stop", None)
+                if on_stop and callable(on_stop):
+                    try:
+                        logger.debug(f"Calling on_stop for plugin {plugin_id}")
+                        if asyncio.iscoroutinefunction(on_stop):
+                            await on_stop(app)
+                        else:
+                            on_stop(app)
+                    except Exception as e:
+                        logger.error(f"Error in on_stop for plugin {plugin_id}: {e}")
+    
     def discover_plugins(self) -> List[PluginMetadata]:
         """
         Discover all available plugins in the plugins/ directory.
@@ -113,7 +147,7 @@ class PluginLoader:
                 continue
             
             for plugin_dir in plugins_path.iterdir():
-                if plugin_dir.is_dir():
+                if plugin_dir.is_dir() and not plugin_dir.name.startswith('__'):
                     metadata = self._load_plugin_metadata(plugin_dir)
                     if metadata:
                         discovered.append(metadata)
@@ -227,29 +261,28 @@ class PluginLoader:
                 if site_packages:
                     sys.path.insert(0, str(site_packages))
             
-            # Always load router.py directly to avoid circular imports
-            # The router module should be the entrypoint
-            module_name_to_load = metadata.router_module or metadata.backend_entrypoint
+            # Get unique package name for this plugin to ensure consistent module instances
+            package_name = self._get_plugin_package_name(metadata.id)
+            
+            # Ensure the package module exists in sys.modules
+            # This allows relative imports like 'from .service import ...' to work correctly
+            if package_name not in sys.modules:
+                pkg = type(sys)(package_name)
+                pkg.__path__ = [str(backend_path)]
+                pkg.__package__ = package_name
+                sys.modules[package_name] = pkg
+            
+            # Load the router module as a submodule of the plugin package (e.g., plugin_mail.router)
+            # CRITICAL: Use dot notation so relative imports 'from .service' point to the same package
+            module_name_to_load = metadata.backend_entrypoint
+            module_name = f"{package_name}.{module_name_to_load}"
             router_path = backend_path / f"{module_name_to_load}.py"
             
             if not router_path.exists():
                 logger.error(f"Plugin router module not found: {router_path}")
                 return None
             
-            # Register the backend package first if __init__.py exists
-            # This enables relative imports within the plugin
-            init_path = backend_path / "__init__.py"
-            if init_path.exists():
-                # Create an empty package module for the backend
-                backend_module_name = f"plugin_{metadata.id}_backend"
-                backend_module = type(sys)("backend")
-                backend_module.__path__ = [str(backend_path)]
-                backend_module.__package__ = "backend"
-                sys.modules["backend"] = backend_module
-                sys.modules[backend_module_name] = backend_module
-            
-            # Now load the router module
-            module_name = f"plugin_{metadata.id}_{module_name_to_load}"
+            # Register the module but don't use 'backend' alias as it conflicts between plugins
             spec = importlib.util.spec_from_file_location(
                 module_name,
                 router_path,
@@ -260,8 +293,14 @@ class PluginLoader:
                 return None
             
             module = importlib.util.module_from_spec(spec)
+            # CRITICAL: Set the package attribute so relative imports work and are consistent
+            module.__package__ = package_name
+            
             sys.modules[module_name] = module
             spec.loader.exec_module(module)
+            
+            # Store module reference for lifecycle hooks
+            metadata.module = module
             
             # Get the router from the module
             router = getattr(module, "router", None)
@@ -270,13 +309,15 @@ class PluginLoader:
                 return None
             
             return router
+        except Exception:
+            logger.error(f"Failed to load plugin router for {metadata.id}: ")
+            exc_type, exc_msg, tb = sys.exc_info()
+            logger.error(f"Exception location: {tb.tb_frame.f_code.co_filename}，line {tb.tb_lineno}, | {exc_type.__name__}: {exc_msg}")
+            return None
             
         finally:
             # Restore original sys.path
             sys.path = self._original_sys_path
-            # Clean up temporary module registrations
-            if "backend" in sys.modules:
-                del sys.modules["backend"]
     
     def _find_site_packages(self, venv_path: Path) -> Optional[Path]:
         """Find site-packages directory in a virtualenv"""
@@ -291,7 +332,13 @@ class PluginLoader:
                 return candidate
         
         return None
+
     
+    def _get_plugin_package_name(self, plugin_id: str) -> str:
+        """Get a consistent sanitized package name for a plugin (no dots or dashes)"""
+        sanitized = plugin_id.replace("-", "_").replace(".", "_")
+        return f"plugin_{sanitized}"
+
     def get_plugin(self, plugin_id: str) -> Optional[PluginMetadata]:
         """Get plugin metadata by ID"""
         return self.plugins.get(plugin_id)
@@ -355,6 +402,7 @@ class PluginLoader:
             del app.router.routes[i]
         
         metadata.loaded = False
+        metadata.module = None
         logger.info(f"Unloaded plugin: {plugin_id} (removed {len(routes_to_remove)} routes)")
         return True
     
@@ -439,7 +487,98 @@ class PluginLoader:
         self.discover_plugins()
         
         # Re-register all
-        return self.register_all_routers(app)
+        registered = self.register_all_routers(app)
+        
+        # Reload services
+        # Note: In a real app, you might want to pass storage/indexer here
+        # For simplicity, we assume they are already available in core.context
+        from core.context import indexer
+        self.register_all_services(indexer)
+        
+        return registered
+
+    def register_all_services(self, indexer: Any) -> int:
+        """
+        Discover and register services from each plugin.
+        Expected entrypoint: backend/service.py with a class named {PluginID}Service
+        """
+        from core.context import register_service
+        registered = 0
+        
+        for plugin_id, metadata in self.plugins.items():
+            backend_path = metadata.path / "backend"
+            service_path = backend_path / "service.py"
+            
+            if not service_path.exists():
+                continue
+            
+            # Save original sys.path
+            current_sys_path = sys.path.copy()
+
+            try:
+                # Use consistent package naming logic
+                package_name = self._get_plugin_package_name(plugin_id)
+                
+                # Ensure the package exists in sys.modules
+                if package_name not in sys.modules:
+                    pkg = type(sys)(package_name)
+                    pkg.__path__ = [str(backend_path)]
+                    pkg.__package__ = package_name
+                    sys.modules[package_name] = pkg
+                
+                # Load the service module as a submodule (e.g., plugin_mail.service)
+                module_name = f"{package_name}.service"
+                
+                # If already loaded (e.g. by router), just use it
+                if module_name in sys.modules:
+                    module = sys.modules[module_name]
+                else:
+                    spec = importlib.util.spec_from_file_location(module_name, service_path)
+                    if not spec or not spec.loader:
+                        continue
+                    
+                    module = importlib.util.module_from_spec(spec)
+                    # CRITICAL: Set the package attribute so relative imports work
+                    module.__package__ = package_name
+                    sys.modules[module_name] = module
+                    spec.loader.exec_module(module)
+                
+                # Check for factory function
+                get_service_func = getattr(module, "init_plugin_service", None)
+                
+                if get_service_func and callable(get_service_func):
+                    logger.info(f"Initializing service for plugin {plugin_id}")
+                    try:
+                        # Try factory with arguments
+                        service_instance = get_service_func(indexer, plugin_id=plugin_id)
+                        if service_instance:
+                            register_service(plugin_id, service_instance)
+                            registered += 1
+                        else:
+                             # Some services might return None if disabled/failed
+                             logger.warning(f"Plugin {plugin_id} factory returned None")
+
+                    except TypeError:
+                        # Fallback for factories that might not accept arguments (though they should)
+                        # or other TypeError. Try without arguments?
+                        logger.warning(f"Plugin {plugin_id} factory failed with arguments, trying without args.")
+                        try:
+                            service_instance = get_service_func() # type: ignore
+                            if service_instance:
+                                register_service(plugin_id, service_instance)
+                                registered += 1
+                        except Exception as e2:
+                            logger.error(f"Plugin {plugin_id} factory failed: {e2}")
+                else:
+                    logger.debug(f"No get_plugin_service factory found for plugin {plugin_id}")
+
+            except Exception as e:
+                logger.error(f"Failed to load service for plugin {plugin_id}: {e}")
+            finally:
+                # Restore sys.path
+                sys.path = current_sys_path
+                
+        return registered
     
     def get_db_table_prefix(self, plugin_id: str) -> str:
         """
@@ -478,7 +617,16 @@ def init_all_plugins(app: "FastAPI"):
         plugin_loader.discover_plugins()
 
         registered_count = plugin_loader.register_all_routers(app)
-        logger.info(f"Plugin system initialized: {registered_count} plugins loaded")
+        
+        # Load plugin services
+        from core.context import indexer
+        services_count = plugin_loader.register_all_services(indexer)
+        
+        # Run startup hooks
+        import asyncio
+        asyncio.create_task(plugin_loader.run_on_startup(app))
+        
+        logger.info(f"Plugin system initialized: {registered_count} routers, {services_count} services loaded")
     except Exception as e:
         logger.error(f"Failed to initialize plugin system: {e}")
 

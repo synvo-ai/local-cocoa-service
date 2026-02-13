@@ -957,9 +957,9 @@ class FileMixin:
             id=row["id"],
             path=Path(row["path"]),
             label=row["label"],
-            created_at=dt.datetime.fromisoformat(row["created_at"]),
-            updated_at=dt.datetime.fromisoformat(row["updated_at"]),
-            last_indexed_at=dt.datetime.fromisoformat(row["last_indexed_at"]) if row["last_indexed_at"] else None,
+            created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
+            updated_at=dt.datetime.fromisoformat(row["updated_at"].replace('Z', '+00:00')),
+            last_indexed_at=dt.datetime.fromisoformat(row["last_indexed_at"].replace('Z', '+00:00')) if row["last_indexed_at"] else None,
             enabled=bool(row["enabled"]),
             failed_files=failed_files,
             indexed_count=row["indexed_count"] if "indexed_count" in keys else 0,
@@ -972,7 +972,7 @@ class FileMixin:
         keys = row.keys()
         raw_status = row["index_status"] if "index_status" in keys else None
         error_reason = row["error_reason"] if "error_reason" in keys else None
-        error_at = dt.datetime.fromisoformat(row["error_at"]) if "error_at" in keys and row["error_at"] else None
+        error_at = dt.datetime.fromisoformat(row["error_at"].replace('Z', '+00:00')) if "error_at" in keys and row["error_at"] else None
         
         has_embedding = row["embedding_vector"] is not None
         has_summary = row["summary"] is not None and row["summary"] != ""
@@ -995,18 +995,18 @@ class FileMixin:
         
         # Two-round indexing stage fields
         fast_stage = row["fast_stage"] if "fast_stage" in keys and row["fast_stage"] is not None else 0
-        fast_text_at = dt.datetime.fromisoformat(row["fast_text_at"]) if "fast_text_at" in keys and row["fast_text_at"] else None
-        fast_embed_at = dt.datetime.fromisoformat(row["fast_embed_at"]) if "fast_embed_at" in keys and row["fast_embed_at"] else None
+        fast_text_at = dt.datetime.fromisoformat(row["fast_text_at"].replace('Z', '+00:00')) if "fast_text_at" in keys and row["fast_text_at"] else None
+        fast_embed_at = dt.datetime.fromisoformat(row["fast_embed_at"].replace('Z', '+00:00')) if "fast_embed_at" in keys and row["fast_embed_at"] else None
         deep_stage = row["deep_stage"] if "deep_stage" in keys and row["deep_stage"] is not None else 0
-        deep_text_at = dt.datetime.fromisoformat(row["deep_text_at"]) if "deep_text_at" in keys and row["deep_text_at"] else None
-        deep_embed_at = dt.datetime.fromisoformat(row["deep_embed_at"]) if "deep_embed_at" in keys and row["deep_embed_at"] else None
+        deep_text_at = dt.datetime.fromisoformat(row["deep_text_at"].replace('Z', '+00:00')) if "deep_text_at" in keys and row["deep_text_at"] else None
+        deep_embed_at = dt.datetime.fromisoformat(row["deep_embed_at"].replace('Z', '+00:00')) if "deep_embed_at" in keys and row["deep_embed_at"] else None
         
         # Privacy level
         privacy_level = row["privacy_level"] if "privacy_level" in keys and row["privacy_level"] else "normal"
         
         # Memory extraction fields
         memory_status = row["memory_status"] if "memory_status" in keys and row["memory_status"] else "pending"
-        memory_extracted_at = dt.datetime.fromisoformat(row["memory_extracted_at"]) if "memory_extracted_at" in keys and row["memory_extracted_at"] else None
+        memory_extracted_at = dt.datetime.fromisoformat(row["memory_extracted_at"].replace('Z', '+00:00')) if "memory_extracted_at" in keys and row["memory_extracted_at"] else None
         memory_total_chunks = row["memory_total_chunks"] if "memory_total_chunks" in keys and row["memory_total_chunks"] is not None else 0
         memory_processed_chunks = row["memory_processed_chunks"] if "memory_processed_chunks" in keys and row["memory_processed_chunks"] is not None else 0
         memory_last_chunk_size = row["memory_last_chunk_size"] if "memory_last_chunk_size" in keys and row["memory_last_chunk_size"] is not None else None
@@ -1018,13 +1018,13 @@ class FileMixin:
             name=row["name"],
             extension=row["extension"],
             size=int(row["size"]),
-            modified_at=dt.datetime.fromisoformat(row["modified_at"]),
-            created_at=dt.datetime.fromisoformat(row["created_at"]),
+            modified_at=dt.datetime.fromisoformat(row["modified_at"].replace('Z', '+00:00')),
+            created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
             kind=row["kind"] if row["kind"] else "other",
             hash=row["hash"],
             summary=row["summary"],
             embedding_vector=FileMixin._deserialize_vector(row["embedding_vector"]),
-            embedding_determined_at=dt.datetime.fromisoformat(row["embedding_determined_at"]) if row["embedding_determined_at"] else None,
+            embedding_determined_at=dt.datetime.fromisoformat(row["embedding_determined_at"].replace('Z', '+00:00')) if row["embedding_determined_at"] else None,
             mime_type=row["mime_type"],
             checksum_sha256=row["checksum_sha256"],
             duration_seconds=row["duration_seconds"],
@@ -1057,7 +1057,7 @@ class FileMixin:
         privacy_level = row["privacy_level"] if "privacy_level" in keys and row["privacy_level"] else "normal"
         memory_extracted_at = None
         if "memory_extracted_at" in keys and row["memory_extracted_at"]:
-            memory_extracted_at = dt.datetime.fromisoformat(row["memory_extracted_at"])
+            memory_extracted_at = dt.datetime.fromisoformat(row["memory_extracted_at"].replace('Z', '+00:00'))
 
         # Spatial metadata (backward compatible - may be None)
         page_num = row["page_num"] if "page_num" in keys and row["page_num"] is not None else None
@@ -1086,7 +1086,7 @@ class FileMixin:
             char_count=int(row["char_count"]),
             section_path=row["section_path"],
             metadata=FileMixin._deserialize_metadata(row["metadata"]),
-            created_at=dt.datetime.fromisoformat(row["created_at"]),
+            created_at=dt.datetime.fromisoformat(row["created_at"].replace('Z', '+00:00')),
             version=version,
             privacy_level=privacy_level,
             memory_extracted_at=memory_extracted_at,

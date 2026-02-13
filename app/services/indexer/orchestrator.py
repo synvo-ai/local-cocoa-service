@@ -16,7 +16,6 @@ from core.models import (
     ChunkSnapshot,
     FileRecord,
     FolderRecord,
-    ActivityLog,
 )
 from core.models import IndexProgress, IndexingItem
 from services.storage import IndexStorage
