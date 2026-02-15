@@ -25,6 +25,7 @@ router = APIRouter(prefix="/system", tags=["system"])
 # Response model
 # ---------------------------------------------------------------------------
 
+
 class SystemResourceStatus(BaseModel):
     """Snapshot of system resource utilisation."""
     cpu_percent: float = 0.0

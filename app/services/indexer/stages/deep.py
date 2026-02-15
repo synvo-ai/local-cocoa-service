@@ -43,19 +43,19 @@ except ImportError:
 
 class DeepProcessor:
     """Round 2: Deep vision-based processing.
-    
+
     Responsibilities:
     - Use VLM to extract richer descriptions from images/PDFs
     - Generate chunks_v2 (deep version)
     - Generate embeddings for deep chunks
     - Store in both SQLite and Qdrant
     - Update deep_stage from 0 -> 2 (text+embed together)
-    
+
     Only processes files that would benefit from VLM:
     - Images
     - PDFs with visual content
     - Presentations with images
-    
+
     Skips:
     - Plain text files
     - Audio/video (handled separately)
@@ -87,11 +87,11 @@ class DeepProcessor:
 
     async def process(self, file_id: str, file_record: Optional[FileRecord] = None) -> bool:
         """Process a single file with VLM for deep understanding.
-        
+
         Args:
             file_id: The file ID to process
             file_record: Optional pre-fetched file record to avoid redundant DB lookup
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -217,7 +217,7 @@ class DeepProcessor:
                         for key in ["page_number", "page_numbers"]:
                             if key in chunk.metadata:
                                 doc_metadata[key] = chunk.metadata[key]
-                    
+
                     documents.append(VectorDocument(
                         doc_id=chunk.chunk_id,
                         vector=vector,
@@ -269,16 +269,16 @@ class DeepProcessor:
                     combined_text += "\n\n--- Deep Analysis ---\n\n" + deep_text
                 else:
                     combined_text = deep_text
-            
+
             should_extract_memory = (
-                self.enable_memory_extraction 
-                and MEMORY_AVAILABLE 
+                self.enable_memory_extraction
+                and MEMORY_AVAILABLE
                 and combined_text
                 and settings.memory_extraction_stage == "deep"
             )
             logger.info(
                 "🧠 Memory check (deep): enable=%s, available=%s, text_len=%d, stage=%s, will_extract=%s",
-                self.enable_memory_extraction, MEMORY_AVAILABLE, 
+                self.enable_memory_extraction, MEMORY_AVAILABLE,
                 len(combined_text) if combined_text else 0,
                 settings.memory_extraction_stage, should_extract_memory
             )
@@ -442,7 +442,7 @@ class DeepProcessor:
 
                 if cleaned:
                     page_results.append(cleaned)
-                    
+
                     # Create a chunk for this page
                     chunk_id = f"{record.id}::deep::page_{page_num}"
                     chunks.append(ChunkSnapshot(
@@ -502,7 +502,7 @@ class DeepProcessor:
 
         now = dt.datetime.now(dt.timezone.utc)
         chunk_id = f"{record.id}::deep::full"
-        
+
         return [ChunkSnapshot(
             chunk_id=chunk_id,
             file_id=record.id,
@@ -551,7 +551,7 @@ class DeepProcessor:
 
     async def _extract_memory(self, record: FileRecord, text: str) -> None:
         """Extract memory from file content during deep stage.
-        
+
         This extracts:
         - Episode memory (what happened)
         - Event logs (actionable events)  

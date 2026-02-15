@@ -30,12 +30,12 @@ logger = logging.getLogger(__name__)
 
 class TwoRoundScheduler:
     """Priority-based scheduler for two-round indexing.
-    
+
     Execution order (strict priority):
     1. Fast Text (all files) - enables keyword search
     2. Fast Embedding (all files) - enables vector search  
     3. Deep (one file at a time) - enhances search quality
-    
+
     Supports:
     - Per-stage pause/resume
     - Batch processing for embeddings
@@ -68,7 +68,7 @@ class TwoRoundScheduler:
         # Batch sizes
         self.fast_text_batch_size = 10
         self.fast_embed_batch_size = 50
-        
+
         # Running state
         self._running = False
         self._cancel_requested = False
@@ -99,31 +99,31 @@ class TwoRoundScheduler:
 
     def start_semantic(self) -> bool:
         """Start Semantic indexing (embedding generation).
-        
+
         Semantic is paused by default.
         User must explicitly call this to enable embedding processing.
-        
+
         Returns:
             True if Semantic was started, False if already running
         """
         if not self.paused["fast_embed"]:
             logger.info("Semantic processing is already enabled")
             return False
-        
+
         self.paused["fast_embed"] = False
         logger.info("Semantic processing started by user request")
         return True
 
     def stop_semantic(self) -> bool:
         """Stop Semantic indexing (embedding generation).
-        
+
         Returns:
             True if Semantic was stopped, False if already paused
         """
         if self.paused["fast_embed"]:
             logger.info("Semantic processing is already paused")
             return False
-        
+
         self.paused["fast_embed"] = True
         logger.info("Semantic processing stopped by user request")
         return True
@@ -134,31 +134,31 @@ class TwoRoundScheduler:
 
     def start_deep(self) -> bool:
         """Start Deep indexing (Round 2).
-        
+
         Deep is paused by default to prevent high CPU usage.
         User must explicitly call this to enable Deep processing.
-        
+
         Returns:
             True if Deep was started, False if already running
         """
         if not self.paused["deep"]:
             logger.info("Deep processing is already enabled")
             return False
-        
+
         self.paused["deep"] = False
         logger.info("Deep processing started by user request")
         return True
 
     def stop_deep(self) -> bool:
         """Stop Deep indexing (Round 2).
-        
+
         Returns:
             True if Deep was stopped, False if already paused
         """
         if self.paused["deep"]:
             logger.info("Deep processing is already paused")
             return False
-        
+
         self.paused["deep"] = True
         logger.info("Deep processing stopped by user request")
         return True
@@ -173,18 +173,18 @@ class TwoRoundScheduler:
         max_iterations: Optional[int] = None,
     ) -> IndexProgress:
         """Run the scheduler continuously until all work is done.
-        
+
         Args:
             folder_id: Optional folder to limit processing to
             max_iterations: Optional limit on processing iterations (for testing)
-            
+
         Returns:
             Final index progress status
         """
         self._running = True
         self._cancel_requested = False
         iterations = 0
-        
+
         started = dt.datetime.now(dt.timezone.utc)
         self.state.progress = IndexProgress(
             status="running",
@@ -205,7 +205,7 @@ class TwoRoundScheduler:
                 await self.state.pause_event.wait()
 
                 work_done = await self._process_one_round(folder_id)
-                
+
                 if not work_done:
                     # No more work to do
                     break
@@ -286,7 +286,7 @@ class TwoRoundScheduler:
 
     async def _process_one_round(self, folder_id: Optional[str] = None) -> bool:
         """Process one round of work following strict priority.
-        
+
         Returns True if any work was done, False if nothing to do.
         """
         # ═══════════════════════════════════════════════════════════════
@@ -305,14 +305,14 @@ class TwoRoundScheduler:
                     if self._cancel_requested:
                         return False
                     await self.state.pause_event.wait()
-                    
+
                     self._set_active(file_record, "fast_text")
                     success = await self.fast_text.process(file_record.id, file_record=file_record)
                     if success:
                         self.state.progress.processed += 1
                     else:
                         self.state.progress.failed += 1
-                
+
                 self.state.reset_active_state()
                 return True  # Work was done, check priority again
 
@@ -326,7 +326,7 @@ class TwoRoundScheduler:
             pending_text = self.storage.list_files_by_stage(
                 fast_stage=0, limit=1, folder_id=folder_id
             )
-            
+
             # Only proceed to embedding if no files pending fast_text
             # Summary generation no longer blocks embedding
             if not pending_text:
@@ -338,19 +338,19 @@ class TwoRoundScheduler:
 
                 if ready:
                     logger.info("Processing %d files for fast_embed (batch mode)", len(ready))
-                    
+
                     if self._cancel_requested:
                         return False
                     await self.state.pause_event.wait()
-                    
+
                     # Set active file to the first file in batch for UI
                     self._set_active(ready[0], "fast_embed")
-                    
+
                     # Use batch processing for better GPU utilization
                     file_ids = [f.id for f in ready]
                     success_count = await self.fast_embed.process_batch(file_ids)
                     self.state.progress.processed += success_count
-                    
+
                     # Remove remaining batch files from pending
                     for f in ready[1:]:
                         p = Path(f.path) if isinstance(f.path, str) else f.path
@@ -360,7 +360,7 @@ class TwoRoundScheduler:
                                 self.state.pending_paths[fid].remove(p)
                             except ValueError:
                                 pass
-                    
+
                     self.state.reset_active_state()
                     return True  # Work was done
 
@@ -376,14 +376,14 @@ class TwoRoundScheduler:
             pending_embed = self.storage.list_files_by_stage(
                 fast_stage=1, limit=1, folder_id=folder_id
             )
-            
+
             # Only generate summaries after fast index is fully complete
             if not pending_text and not pending_embed:
                 # Check if there are files needing summary
                 files_needing_summary = self.storage.list_files_needing_summary(
                     folder_id=folder_id, limit=1
                 )
-                
+
                 if files_needing_summary:
                     logger.info("Fast index complete, generating batch summaries")
                     summary_count = await self.fast_text.generate_summaries_batch(
@@ -416,17 +416,17 @@ class TwoRoundScheduler:
                 if ready:
                     file_record = ready[0]
                     logger.info("Processing %s for deep", file_record.name)
-                    
+
                     await self.state.pause_event.wait()
                     self._set_active(file_record, "deep")
                     success = await self.deep.process(file_record.id, file_record=file_record)
-                    
+
                     if success:
                         self.state.progress.processed += 1
                     else:
                         # Deep rejected the file (e.g. stage mismatch) — don't spin
                         logger.warning("Deep processing returned False for %s", file_record.name)
-                    
+
                     self.state.reset_active_state()
                     return True  # Slot was consumed, re-evaluate priorities
 
@@ -435,13 +435,13 @@ class TwoRoundScheduler:
 
     def get_stage_progress(self, folder_id: Optional[str] = None) -> dict:
         """Get progress statistics for all stages.
-        
+
         Returns dict with counts for each stage.
         """
         counts = self.storage.count_files_by_stage(folder_id)
-        
+
         total = counts.get("total", 0)
-        
+
         # Calculate progress percentages
         fast_text_done = counts.get("fast_text_done", 0) + counts.get("fast_embed_done", 0)
         fast_embed_done = counts.get("fast_embed_done", 0)
@@ -449,7 +449,7 @@ class TwoRoundScheduler:
         deep_skipped = counts.get("deep_skipped", 0)
         deep_error = counts.get("deep_error", 0)
         deep_terminal = deep_done + deep_skipped + deep_error  # all non-pending files
-        
+
         return {
             "total": total,
             "fast_text": {
@@ -477,4 +477,3 @@ class TwoRoundScheduler:
             "semantic_enabled": not self.paused["fast_embed"],  # Top-level for easy access
             "deep_enabled": not self.paused["deep"],  # Top-level for easy access
         }
-

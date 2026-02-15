@@ -1,33 +1,34 @@
 import sys
 from pathlib import Path
 
-# Ensure app root is in path. to simplify all imports, packages inside app folder can be directlyimported
+# Ensure app root is in path. to simplify all imports, packages inside app folder can be directly imported
 sys.path.append(str(Path(__file__).parent))
 
-# Core Routers
-from services.drive import files_router as files
-from services.drive import folders_router as folders
-from services.indexer import router as index
-from services.search import router as search
-from services.memory import router as memory
-from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router
-
-from core.context import get_indexer, get_storage
-from core.config import settings
-from core.models import FolderRecord
-from core.auth import verify_api_key, ensure_local_key
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends
+import datetime as dt
+import hashlib
+import logging.handlers
+import logging
+import asyncio
+from plugins import init_all_plugins
 from core.model_manager import get_model_manager
+from core.auth import verify_api_key, ensure_local_key
+from core.models import FolderRecord
+from core.config import settings
+from core.context import get_indexer, get_storage
+from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router
+from services.memory import router as memory
+from services.search import router as search
+from services.indexer import router as index
+from services.drive import folders_router as folders
+from services.drive import files_router as files
+
+# Core Routers
+
 
 # Plugin system
-from plugins import init_all_plugins
 
-import asyncio
-import logging
-import logging.handlers
-import hashlib
-import datetime as dt
-from pathlib import Path
-import sys
 
 # Force ProactorEventLoop on Windows to avoid "too many file descriptors" error
 if sys.platform == 'win32':
@@ -36,9 +37,11 @@ if sys.platform == 'win32':
 # ── Centralized Logging Setup ──────────────────────────────────────────────
 # Writes all WARNING+ logs to a rotating file in the runtime/logs directory.
 # Works in both dev (uvicorn --reload) and prod (PyInstaller frozen).
+
+
 def _setup_file_logging() -> None:
     """Configure a rotating file handler for the root logger.
-    
+
     Log file: <runtime_root>/logs/local-cocoa-service.log
     Rotates at 5 MB, keeps 3 backups.
     """
@@ -74,10 +77,9 @@ def _setup_file_logging() -> None:
         # Don't crash the app if log setup fails
         print(f"[warn] Failed to set up file logging: {exc}", file=sys.stderr)
 
+
 _setup_file_logging()
 
-from fastapi import FastAPI, Depends
-from fastapi.middleware.cors import CORSMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +145,7 @@ async def _poll_loop(interval: int) -> None:
         if indexer.status().status == "running":
             logger.debug("Poll loop: indexer already running, skipping")
             continue
-        
+
         # Also check if the lock is held - legacy refresh() might be running
         if indexer.state.lock.locked():
             logger.debug("Poll loop: indexer lock held (legacy task running), skipping")
@@ -233,10 +235,10 @@ async def on_shutdown():
     # Stop managed models
     from core.model_manager import get_model_manager
     manager = get_model_manager()
-    
+
     if manager:
         manager.stop_all_models()
-    
+
     # Stop plugins
     from plugins.loader import get_plugin_loader
     loader = get_plugin_loader()
@@ -285,7 +287,7 @@ async def on_shutdown():
         except asyncio.CancelledError:
             pass
         _throttle_task = None
-    
+
     # Stop all model processes (llama-server instances)
     try:
         get_model_manager().stop_all_models()
