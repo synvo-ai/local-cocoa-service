@@ -1,28 +1,28 @@
+from services.drive import files_router as files
+from services.drive import folders_router as folders
+from services.indexer import router as index
+from services.search import router as search
+from services.memory import router as memory
+from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router
+from core.context import get_indexer, get_storage
+from core.config import settings
+from core.models import FolderRecord
+from core.auth import verify_api_key, ensure_local_key
+from core.model_manager import get_model_manager
+from plugins import init_all_plugins
+import asyncio
+import logging
+import logging.handlers
+import hashlib
+import datetime as dt
+from fastapi import FastAPI, Depends
+from fastapi.middleware.cors import CORSMiddleware
 import sys
 from pathlib import Path
 
 # Ensure app root is in path. to simplify all imports, packages inside app folder can be directly imported
 sys.path.append(str(Path(__file__).parent))
 
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi import FastAPI, Depends
-import datetime as dt
-import hashlib
-import logging.handlers
-import logging
-import asyncio
-from plugins import init_all_plugins
-from core.model_manager import get_model_manager
-from core.auth import verify_api_key, ensure_local_key
-from core.models import FolderRecord
-from core.config import settings
-from core.context import get_indexer, get_storage
-from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router
-from services.memory import router as memory
-from services.search import router as search
-from services.indexer import router as index
-from services.drive import folders_router as folders
-from services.drive import files_router as files
 
 # Core Routers
 
