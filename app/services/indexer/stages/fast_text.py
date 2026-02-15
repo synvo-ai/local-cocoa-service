@@ -50,13 +50,13 @@ except ImportError:
 
 class FastTextProcessor:
     """Round 1 Stage 1: Fast text extraction.
-    
+
     Responsibilities:
     - Extract text from files using fast methods (PyMuPDF OCR, text extraction)
     - Generate text chunks (v1)
     - Store chunks in SQLite (FTS5 for keyword search)
     - Update fast_stage from 0 -> 1
-    
+
     Does NOT:
     - Generate embeddings (that's FastEmbedProcessor)
     - Use VLM vision models (that's DeepProcessor)
@@ -83,11 +83,11 @@ class FastTextProcessor:
 
     async def process(self, file_id: str, file_record: Optional[FileRecord] = None) -> bool:
         """Process a single file: extract text and create chunks.
-        
+
         Args:
             file_id: The file ID to process
             file_record: Optional pre-fetched file record to avoid redundant DB lookup
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -105,8 +105,10 @@ class FastTextProcessor:
 
         path = file_record.path
         if not path.exists():
-            logger.warning("File path does not exist: %s", path)
+            reason = f"File no longer exists: {path}"
+            logger.warning(reason)
             self.storage.update_file_stage(file_id, fast_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         try:
@@ -127,7 +129,7 @@ class FastTextProcessor:
             stat = path.stat()
             extension = path.suffix.lower().lstrip(".")
             mime_type, _ = mimetypes.guess_type(str(path))
-            
+
             # OPTIMIZATION: Skip expensive SHA256 checksum during fast indexing.
             # Use a lightweight fingerprint (size + mtime) for change detection.
             # Full checksum can be computed lazily during deep indexing if needed.
@@ -140,7 +142,7 @@ class FastTextProcessor:
             file_record.duration_seconds = parsed.duration_seconds
             file_record.page_count = parsed.page_count
             file_record.preview_image = parsed.preview_image
-            
+
             # Merge metadata
             file_record.metadata = file_record.metadata or {}
             file_record.metadata.update(parsed.metadata)
@@ -163,7 +165,7 @@ class FastTextProcessor:
 
             # Build chunks (pass text_blocks for spatial metadata)
             chunks = self._build_chunks(file_record, artifact, text_blocks=parsed.text_blocks)
-            
+
             # Set chunk version to "fast"
             for chunk in chunks:
                 chunk.version = "fast"
@@ -175,7 +177,7 @@ class FastTextProcessor:
             file_record.metadata["vector_chunks_fast"] = [c.chunk_id for c in chunks]
             file_record.metadata["chunk_count_fast"] = len(chunks)
             file_record.metadata["chunk_strategy"] = "fast_text_v1"
-            
+
             # Note: Summary generation is deferred to batch processing
             # after all files complete fast_text stage.
             # Store the text length for later summary generation
@@ -197,14 +199,14 @@ class FastTextProcessor:
             # Trigger memory extraction in background (non-blocking)
             # Only extract during fast stage if memory_extraction_stage == "fast"
             should_extract_memory = (
-                self.enable_memory_extraction 
-                and MEMORY_AVAILABLE 
+                self.enable_memory_extraction
+                and MEMORY_AVAILABLE
                 and artifact.text
                 and settings.memory_extraction_stage == "fast"
             )
             logger.info(
                 "🧠 Memory check: enable=%s, available=%s, text_len=%d, stage=%s, will_extract=%s",
-                self.enable_memory_extraction, MEMORY_AVAILABLE, 
+                self.enable_memory_extraction, MEMORY_AVAILABLE,
                 len(artifact.text) if artifact.text else 0,
                 settings.memory_extraction_stage, should_extract_memory
             )
@@ -218,8 +220,14 @@ class FastTextProcessor:
             return True
 
         except Exception as exc:
-            logger.warning("Fast text failed for %s: %s", file_id, exc)
+            reason = f"Fast text failed: {type(exc).__name__}: {exc}"
+            logger.error(
+                "Fast text failed for %s (%s): %s",
+                file_id, file_record.name if file_record else file_id, exc,
+                exc_info=True,
+            )
             self.storage.update_file_stage(file_id, fast_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         finally:
@@ -227,30 +235,30 @@ class FastTextProcessor:
 
     def _calculate_max_input_chars(self) -> int:
         """Dynamically calculate max input chars based on LLM context length.
-        
+
         Reserves tokens for:
         - System prompt (~100 tokens)
         - File metadata (~50 tokens)
         - Output tokens (summary_max_tokens)
         - Safety margin (10%)
-        
+
         Returns:
             Maximum number of characters for document content
         """
         context_tokens = getattr(settings, "llm_context_tokens", 32768)
         chars_per_token = getattr(settings, "llm_chars_per_token", 8)
         summary_max_tokens = getattr(settings, "summary_max_tokens", 256)
-        
+
         # Reserve tokens for system prompt, metadata, and output
         reserved_tokens = 100 + 50 + summary_max_tokens
         # Apply 10% safety margin
         available_tokens = int((context_tokens - reserved_tokens) * 0.9)
-        
+
         max_chars = available_tokens * chars_per_token
-        
+
         # Also respect the explicit setting if it's lower
         explicit_limit = getattr(settings, "summary_input_max_chars", 100000)
-        
+
         return min(max_chars, explicit_limit)
 
     async def _generate_llm_summary(
@@ -259,28 +267,28 @@ class FastTextProcessor:
         text: str,
     ) -> str:
         """Generate a summary using LLM instead of simple text truncation.
-        
+
         Args:
             record: The file record with metadata
             text: The full text content of the file
-            
+
         Returns:
             A concise summary of the file content
         """
         if not text or not text.strip():
             return ""
-        
+
         # Prepare metadata context
         metadata_block = self._format_file_metadata_for_llm(record)
-        
+
         # Dynamically calculate max input chars based on context length
         max_input_chars = self._calculate_max_input_chars()
         truncated_content = text.strip()[:max_input_chars]
         if len(text) > max_input_chars:
             truncated_content += "\n...[content truncated]..."
-        
+
         prompt = f"{metadata_block}\n\nContent:\n{truncated_content}"
-        
+
         try:
             messages = [
                 {"role": "system", "content": prompts.DEFAULT_SUMMARY_PROMPT},
@@ -297,10 +305,10 @@ class FastTextProcessor:
                 return cleaned
         except Exception as exc:
             logger.warning("LLM summarization failed for %s: %s, falling back to truncation", record.path, exc)
-        
+
         # Fallback: use first 500 chars if LLM fails
         return text.strip()[:500]
-    
+
     def _format_file_metadata_for_llm(self, record: FileRecord) -> str:
         """Format file metadata as context for LLM summarization."""
         modified = record.modified_at.isoformat() if record.modified_at else "unknown"
@@ -322,30 +330,30 @@ class FastTextProcessor:
         batch_size: int = 50,
     ) -> int:
         """Generate LLM summaries for all files that have completed fast_text but lack summaries.
-        
+
         This is called after all files complete fast_text stage to batch process summaries.
-        
+
         Args:
             folder_id: Optional folder to limit processing to
             batch_size: Number of files to process in each batch
-            
+
         Returns:
             Number of files successfully summarized
         """
         success_count = 0
-        
+
         # Get files that need summary (fast_stage >= 1 and no summary)
         files_needing_summary = self.storage.list_files_needing_summary(
             folder_id=folder_id,
             limit=batch_size,
         )
-        
+
         if not files_needing_summary:
             logger.info("No files need summary generation")
             return 0
-        
+
         logger.info("Generating summaries for %d files", len(files_needing_summary))
-        
+
         for file_record in files_needing_summary:
             try:
                 # Update state for UI
@@ -355,7 +363,7 @@ class FastTextProcessor:
                     progress=success_count / len(files_needing_summary),
                     event=f"Summarizing {file_record.name}"
                 )
-                
+
                 # Get the file's text content from chunks
                 chunks = self.storage.chunks_for_file(file_record.id)
                 if not chunks:
@@ -367,30 +375,30 @@ class FastTextProcessor:
                     )
                     self.storage.update_file_stage(file_record.id, fast_stage=0)
                     continue
-                
+
                 # Concatenate chunk texts to reconstruct file content
                 text = "\n".join(c.text for c in chunks if c.text)
-                
+
                 if not text.strip():
                     logger.warning("No text content in chunks for %s, skipping summary", file_record.name)
                     continue
-                
+
                 # Generate summary
                 summary = await self._generate_llm_summary(file_record, text)
-                
+
                 if summary:
                     file_record.summary = summary
                     self.storage.upsert_file(file_record)
                     success_count += 1
                     logger.info("Summary generated for %s", file_record.name)
-                
+
             except Exception as exc:
                 logger.warning("Failed to generate summary for %s: %s", file_record.path, exc)
                 continue
-        
+
         self.state_manager.reset_active_state()
         logger.info("Batch summary generation complete: %d/%d files", success_count, len(files_needing_summary))
-        
+
         return success_count
 
     def _build_chunks(
@@ -798,4 +806,3 @@ class FastTextProcessor:
                 self.storage.upsert_file(record)
             except Exception:
                 pass  # Ignore storage errors during error handling
-

@@ -5,6 +5,7 @@ This allows the FastAPI app to run as a standalone executable.
 """
 import os
 
+
 def main():
     import uvicorn
     import sys
@@ -12,7 +13,7 @@ def main():
     from pathlib import Path
 
     # Remote debug support: Start as early as possible. so not to use settings here
-    debug_port = os.getenv("LOCAL_SERVICE_DEBUG_PORT",'')
+    debug_port = os.getenv("LOCAL_SERVICE_DEBUG_PORT", '')
     if debug_port and getattr(sys, 'frozen', False):
         try:
             import debugpy
@@ -21,7 +22,7 @@ def main():
             if debugpy_python:
                 print(f"[debug] Configuring debugpy to use python: {debugpy_python}")
                 debugpy.configure(python=debugpy_python)
-            
+
             print(f"[debug] Debugpy starts listening on 0.0.0.0:{int(debug_port)}")
             debugpy.listen(("0.0.0.0", int(debug_port)))
             if os.getenv("LOCAL_SERVICE_DEBUG_WAIT") == "true":
@@ -35,18 +36,18 @@ def main():
         # In PyInstaller bundle, sys._MEIPASS is the bundle dir
         # For onedir, this is also the directory where the exe and external folders live
         project_root = Path(sys._MEIPASS).resolve()
-        
+
         # Ensure the directory containing the executable is in path (for other binary lookups)
         exe_dir = Path(sys.executable).parent
         if str(exe_dir) not in sys.path:
             sys.path.insert(0, str(exe_dir))
-        
+
         # DEV HACK: If we are in dev mode and the src directory is available, use the src directory
         # This makes debugpy report the original source paths, fixing debugger issues.
         potential_src_root = exe_dir.parent.parent
         if os.getenv("DEBUG") == "true" and (potential_src_root / "app").is_dir():
-             print(f"[debug] Dev mode detected, using original source root: {potential_src_root}")
-             project_root = potential_src_root
+            print(f"[debug] Dev mode detected, using original source root: {potential_src_root}")
+            project_root = potential_src_root
 
         print(f"[info] Executable dir: {exe_dir}")
     else:

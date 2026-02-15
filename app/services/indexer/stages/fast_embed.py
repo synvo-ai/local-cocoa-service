@@ -196,7 +196,9 @@ class FastEmbedProcessor:
             return True
 
         except Exception as exc:
-            logger.warning("Fast embed failed for %s: %s", file_id, exc)
+            logger.error(
+                "Fast embed failed for %s: %s", file_id, exc, exc_info=True
+            )
             # Don't set fast_stage to -1, allow retry
             return False
 
@@ -369,7 +371,7 @@ class FastEmbedProcessor:
             self.vector_store.flush()
 
         except Exception as exc:
-            logger.warning("Batch embedding failed: %s", exc)
+            logger.error("Batch embedding failed: %s", exc, exc_info=True)
 
         finally:
             self.state_manager.reset_active_state()

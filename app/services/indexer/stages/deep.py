@@ -43,19 +43,19 @@ except ImportError:
 
 class DeepProcessor:
     """Round 2: Deep vision-based processing.
-    
+
     Responsibilities:
     - Use VLM to extract richer descriptions from images/PDFs
     - Generate chunks_v2 (deep version)
     - Generate embeddings for deep chunks
     - Store in both SQLite and Qdrant
     - Update deep_stage from 0 -> 2 (text+embed together)
-    
+
     Only processes files that would benefit from VLM:
     - Images
     - PDFs with visual content
     - Presentations with images
-    
+
     Skips:
     - Plain text files
     - Audio/video (handled separately)
@@ -87,11 +87,11 @@ class DeepProcessor:
 
     async def process(self, file_id: str, file_record: Optional[FileRecord] = None) -> bool:
         """Process a single file with VLM for deep understanding.
-        
+
         Args:
             file_id: The file ID to process
             file_record: Optional pre-fetched file record to avoid redundant DB lookup
-            
+
         Returns:
             True if successful, False otherwise
         """
@@ -121,10 +121,20 @@ class DeepProcessor:
             self.storage.update_file_stage(file_id, deep_stage=-2)  # -2 = skipped
             return True
 
+        # Set active file for progress display
+        self.state_manager.set_active_file(
+            folder_id=file_record.folder_id,
+            file_path=file_record.path,
+            file_name=file_record.name,
+            kind=file_record.kind,
+        )
+
         path = file_record.path
         if not path.exists():
-            logger.warning("File path does not exist: %s", path)
+            reason = f"File no longer exists: {path}"
+            logger.warning(reason)
             self.storage.update_file_stage(file_id, deep_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         try:
@@ -175,10 +185,18 @@ class DeepProcessor:
                     stage="deep_embed",
                     detail=f"Embedding {len(deep_chunks)} deep chunks",
                     progress=50.0,
+                    event=f"Embedding {len(deep_chunks)} deep chunks",
                 )
 
                 vectors = await self._embed_chunks(deep_chunks)
-                
+
+                self.state_manager.set_active_stage(
+                    stage="deep_embed",
+                    detail=f"Storing {len(deep_chunks)} vectors",
+                    progress=80.0,
+                    event=f"Embedding complete, storing vectors",
+                )
+
                 # Store in vector database
                 documents: list[VectorDocument] = []
                 for chunk, vector in zip(deep_chunks, vectors):
@@ -199,7 +217,7 @@ class DeepProcessor:
                         for key in ["page_number", "page_numbers"]:
                             if key in chunk.metadata:
                                 doc_metadata[key] = chunk.metadata[key]
-                    
+
                     documents.append(VectorDocument(
                         doc_id=chunk.chunk_id,
                         vector=vector,
@@ -230,10 +248,20 @@ class DeepProcessor:
                 file_record.name, len(deep_chunks)
             )
 
+            self.state_manager.set_active_stage(
+                stage="deep_complete",
+                detail=f"Deep processing complete: {len(deep_chunks)} chunks",
+                progress=100.0,
+                event=f"✓ {file_record.name} done ({len(deep_chunks)} chunks)",
+            )
+
             # Memory extraction during deep stage (if configured)
             # Combine fast text + deep text for richer memory extraction
             combined_text = ""
-            fast_chunks = self.storage.get_chunks_by_file(file_id, version="fast")
+            fast_chunks = [
+                c for c in self.storage.chunks_for_file(file_id)
+                if getattr(c, "version", "fast") == "fast"
+            ]
             if fast_chunks:
                 combined_text = "\n\n".join(c.text for c in fast_chunks if c.text)
             if deep_text:
@@ -241,16 +269,16 @@ class DeepProcessor:
                     combined_text += "\n\n--- Deep Analysis ---\n\n" + deep_text
                 else:
                     combined_text = deep_text
-            
+
             should_extract_memory = (
-                self.enable_memory_extraction 
-                and MEMORY_AVAILABLE 
+                self.enable_memory_extraction
+                and MEMORY_AVAILABLE
                 and combined_text
                 and settings.memory_extraction_stage == "deep"
             )
             logger.info(
                 "🧠 Memory check (deep): enable=%s, available=%s, text_len=%d, stage=%s, will_extract=%s",
-                self.enable_memory_extraction, MEMORY_AVAILABLE, 
+                self.enable_memory_extraction, MEMORY_AVAILABLE,
                 len(combined_text) if combined_text else 0,
                 settings.memory_extraction_stage, should_extract_memory
             )
@@ -264,8 +292,14 @@ class DeepProcessor:
             return True
 
         except Exception as exc:
-            logger.warning("Deep processing failed for %s: %s", file_id, exc)
+            reason = f"Deep processing failed: {type(exc).__name__}: {exc}"
+            logger.error(
+                "Deep processing failed for %s (%s): %s",
+                file_id, file_record.name if file_record else file_id, exc,
+                exc_info=True,
+            )
             self.storage.update_file_stage(file_id, deep_stage=-1)
+            self.storage.mark_file_error(file_id, reason)
             return False
 
         finally:
@@ -323,22 +357,45 @@ class DeepProcessor:
             logger.warning("VLM processing failed for image %s: %s", record.path, e)
             return None
 
+    @staticmethod
+    def _render_pdf_pages(path: Path, zoom: float = 2.0) -> dict[str, bytes]:
+        """Render PDF pages to PNG bytes using PyMuPDF — fast, no OCR/VLM."""
+        import fitz  # PyMuPDF
+
+        results: dict[str, bytes] = {}
+        doc = fitz.open(str(path))
+        try:
+            matrix = fitz.Matrix(zoom, zoom)
+            for page_index in range(len(doc)):
+                page = doc[page_index]
+                pix = page.get_pixmap(matrix=matrix, alpha=False)
+                results[f"page_{page_index + 1}"] = pix.tobytes("png")
+        finally:
+            doc.close()
+        return results
+
     async def _process_pdf(self, record: FileRecord) -> tuple[Optional[str], list[ChunkSnapshot]]:
         """Process PDF pages using VLM."""
-        # We need to re-parse to get page images
-        from core.content import content_router
-        
+        # Show parsing phase in UI
+        self.state_manager.set_active_stage(
+            stage="deep_vision",
+            detail=f"Rendering PDF pages for {record.name}",
+            progress=1.0,
+            event=f"Rendering PDF pages: {record.name}",
+        )
+
         try:
-            parsed = await asyncio.to_thread(
-                content_router.parse, record.path, indexing_mode="deep"
+            # Lightweight page render — only converts PDF pages to PNG bytes.
+            # Previous code used content_router.parse(indexing_mode="deep") which
+            # ran OCR + VLM on every page (taking minutes), then _process_pdf
+            # discarded that text and ran VLM again on the same images.
+            page_images = await asyncio.to_thread(
+                self._render_pdf_pages, record.path
             )
         except Exception as e:
-            logger.warning("Failed to parse PDF for deep processing: %s", e)
+            logger.warning("Failed to render PDF pages for deep processing: %s", e)
             return None, []
 
-        attachments = parsed.attachments or {}
-        page_images = {k: v for k, v in attachments.items() if k.startswith("page_")}
-        
         if not page_images:
             return None, []
 
@@ -348,13 +405,23 @@ class DeepProcessor:
         chunks: list[ChunkSnapshot] = []
         now = dt.datetime.now(dt.timezone.utc)
 
+        logger.info("VLM processing %d pages for %s", total_pages, record.name)
+        self.state_manager.set_active_stage(
+            stage="deep_vision",
+            detail=f"VLM processing page 1/{total_pages}",
+            step_current=1,
+            step_total=total_pages,
+            progress=2.0,
+            event=f"Starting VLM for {total_pages} pages",
+        )
+
         for i, (page_key, image_bytes) in enumerate(sorted_pages):
+            # Update detail/step BEFORE VLM call so UI shows which page is active
             self.state_manager.set_active_stage(
                 stage="deep_vision",
                 detail=f"VLM processing page {i + 1}/{total_pages}",
                 step_current=i + 1,
                 step_total=total_pages,
-                progress=((i) / max(total_pages, 1)) * 50,  # 0-50% for VLM
             )
 
             page_num = int(page_key.split("_")[1])
@@ -375,7 +442,7 @@ class DeepProcessor:
 
                 if cleaned:
                     page_results.append(cleaned)
-                    
+
                     # Create a chunk for this page
                     chunk_id = f"{record.id}::deep::page_{page_num}"
                     chunks.append(ChunkSnapshot(
@@ -398,6 +465,17 @@ class DeepProcessor:
 
             except Exception as e:
                 logger.warning("VLM failed for page %d of %s: %s", page_num, record.path, e)
+
+            # Update progress AFTER each page completes (2%-50% range for VLM)
+            page_progress = 2.0 + ((i + 1) / max(total_pages, 1)) * 48.0
+            self.state_manager.set_active_stage(
+                stage="deep_vision",
+                detail=f"Completed page {i + 1}/{total_pages}",
+                step_current=i + 1,
+                step_total=total_pages,
+                progress=page_progress,
+                event=f"Page {i + 1}/{total_pages} done",
+            )
 
         combined_text = "\n\n".join(page_results) if page_results else None
         return combined_text, chunks
@@ -424,7 +502,7 @@ class DeepProcessor:
 
         now = dt.datetime.now(dt.timezone.utc)
         chunk_id = f"{record.id}::deep::full"
-        
+
         return [ChunkSnapshot(
             chunk_id=chunk_id,
             file_id=record.id,
@@ -473,7 +551,7 @@ class DeepProcessor:
 
     async def _extract_memory(self, record: FileRecord, text: str) -> None:
         """Extract memory from file content during deep stage.
-        
+
         This extracts:
         - Episode memory (what happened)
         - Event logs (actionable events)  

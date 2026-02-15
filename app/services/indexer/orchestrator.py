@@ -105,45 +105,45 @@ class Indexer:
             fast_embed_processor=self._fast_embed,
             deep_processor=self._deep,
         )
-        
+
         # Event signaled when new files are registered and need processing
         self._pending_files_event: asyncio.Event | None = None
 
     # --- Public API / State Delegation ---
-    
+
     def get_pending_files_event(self) -> asyncio.Event:
         """Get or create the event that signals pending files need processing."""
         if self._pending_files_event is None:
             self._pending_files_event = asyncio.Event()
         return self._pending_files_event
-    
+
     def signal_pending_files(self) -> None:
         """Signal that there are pending files that need processing."""
         if self._pending_files_event is not None:
             self._pending_files_event.set()
-            
+
     async def trigger_staged_if_pending(self) -> bool:
         """Check for pending files and trigger staged indexing if needed.
-        
+
         Returns:
             True if staged indexing was triggered, False otherwise.
         """
         # Check if there are any pending files (fast_stage=0)
         pending = self.storage.list_files_by_stage(fast_stage=0, limit=1)
-        
+
         if not pending:
             return False
-            
+
         # Only run if not already running
         if self.status().status == "running":
             logger.debug("Indexer already running, skipping auto-trigger")
             return False
-        
+
         # Also check if lock is held (legacy refresh() might be running)
         if self.state.lock.locked():
             logger.debug("Indexer lock held (legacy task running), skipping auto-trigger")
             return False
-            
+
         logger.info("Auto-triggering staged indexer for pending files")
         # Run in background task to not block
         asyncio.create_task(self.refresh_staged(reindex=False))
@@ -321,9 +321,9 @@ class Indexer:
             if reindex and all_file_paths:
                 logger.info("Reindex requested. all_file_paths=%s", all_file_paths)
                 reset_count = self.storage.reset_file_stages_by_path(
-                    all_file_paths, reset_fast=True, reset_deep=False
+                    all_file_paths, reset_fast=True, reset_deep=True
                 )
-                logger.info("Reset fast_stage for %d files for reindexing", reset_count)
+                logger.info("Reset fast_stage + deep_stage for %d files for reindexing", reset_count)
 
             # Determine folder_id filter
             # Always use targets (resolved FolderRecords) to get folder_id, not the raw folders parameter

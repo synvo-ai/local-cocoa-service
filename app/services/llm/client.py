@@ -122,7 +122,7 @@ class EmbeddingClient:
                             await asyncio.sleep(delay)
                             continue
                         if exc.response.status_code == 500:
-                            logger.warning("Embedding endpoint %s returned 500. Restarting model...", endpoint)
+                            logger.error("Embedding endpoint %s returned 500. Restarting model...", endpoint)
                             get_model_manager().stop_model(ModelType.EMBEDDING)
                         errors.append(f"{endpoint}: {exc}")
                         break
@@ -520,11 +520,11 @@ class LlmClient:
                         body = (exc.response.text or "").strip()
                         body_preview = body[:500]
                         last_error = f"HTTP {exc.response.status_code} from vision endpoint: {body_preview}" if body_preview else f"HTTP {exc.response.status_code} from vision endpoint"
-                        logger.warning("Vision describe_frames failed (attempt %d/2): %s", attempt + 1, last_error)
+                        logger.error("Vision describe_frames failed (attempt %d/2): %s", attempt + 1, last_error)
                         break  # Non-503 error, exit retry loop
                     except (httpx.RequestError, ValueError, json.JSONDecodeError) as exc:
                         last_error = f"Vision describe_frames request failed (attempt {attempt + 1}/2): {type(exc).__name__}: {exc}"
-                        logger.warning("%s", last_error)
+                        logger.error("%s", last_error)
                         break  # Exit 503 retry loop on non-retryable error
                 else:
                     # 503 retry loop exhausted without success
