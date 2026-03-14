@@ -22,8 +22,8 @@ from msgraph.generated.users.item.mail_folders.item.messages.messages_request_bu
 
 logger = logging.getLogger(__name__)
 
-# Standard scopes for reading mail
-GRAPH_SCOPES = ["User.Read", "Mail.Read"]
+# Standard scopes for reading and sending mail
+GRAPH_SCOPES = ["User.Read", "Mail.Read", "Mail.Send"]
 
 OUTLOOK_DEFAULT_CLIENT_ID = "f0f434e5-80fb-4db9-823c-36707ec98470"
 OUTLOOK_DEFAULT_TENANT_ID = "common"
@@ -274,3 +274,67 @@ class OutlookService:
                 raise
             logger.exception("Outlook sync failed")
             raise OutlookServiceError(f"Sync failed: {e}") from e
+
+    async def send_message(
+        self,
+        client_id: str,
+        tenant_id: str,
+        to_recipients: list[str],
+        subject: str,
+        body: str,
+        username: str | None = None,
+    ) -> None:
+        """Send an email via Microsoft Graph sendMail API."""
+        app = self._get_app(client_id, tenant_id)
+        accounts = app.get_accounts()
+
+        if not accounts:
+            raise OutlookAuthError("No accounts found in cache. Please sign in again.")
+
+        account = None
+        if username:
+            for acc in accounts:
+                if acc.get("username", "").lower() == username.lower():
+                    account = acc
+                    break
+        if not account:
+            account = accounts[0]
+
+        credential = MsalCredential(app, account)
+        client = GraphServiceClient(credential, GRAPH_SCOPES)
+
+        try:
+            from msgraph.generated.users.item.send_mail.send_mail_post_request_body import (
+                SendMailPostRequestBody,
+            )
+            from msgraph.generated.models.message import Message
+            from msgraph.generated.models.item_body import ItemBody
+            from msgraph.generated.models.body_type import BodyType
+            from msgraph.generated.models.recipient import Recipient
+            from msgraph.generated.models.email_address import EmailAddress
+
+            recipients = [
+                Recipient(email_address=EmailAddress(address=addr.strip()))
+                for addr in to_recipients
+                if addr.strip()
+            ]
+
+            message = Message(
+                subject=subject,
+                body=ItemBody(content_type=BodyType.Text, content=body),
+                to_recipients=recipients,
+            )
+
+            request_body = SendMailPostRequestBody(
+                message=message,
+                save_to_sent_items=True,
+            )
+
+            await client.me.send_mail.post(body=request_body)
+            logger.info("Outlook email sent to %s", to_recipients)
+
+        except Exception as e:
+            if isinstance(e, (OutlookAuthError, OutlookServiceError)):
+                raise
+            logger.exception("Outlook send failed")
+            raise OutlookServiceError(f"Send failed: {e}") from e

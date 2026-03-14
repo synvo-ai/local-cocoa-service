@@ -9,6 +9,7 @@ from core.models import (
     ChatMessage,
     ChatSessionCreate, # Keeping this as it's used later in the code
     ChatMessageCreate, # Keeping this as it's used later in the code
+    ChatMessageUpdate,
 )
 
 
@@ -85,7 +86,24 @@ async def add_message(session_id: str, payload: ChatMessageCreate):
         meta=payload.meta,
         references=payload.references,
         is_multi_path=payload.is_multi_path,
-        thinking_steps=payload.thinking_steps
+        thinking_steps=payload.thinking_steps,
+        needs_user_decision=payload.needs_user_decision,
+        resume_token=payload.resume_token,
+        decision_message=payload.decision_message,
+        tool_calls=payload.tool_calls,
     )
     storage.add_chat_message(message)
+    return message
+
+
+@router.put("/sessions/{session_id}/messages/{message_id}", response_model=ChatMessage)
+async def update_message(session_id: str, message_id: str, payload: ChatMessageUpdate):
+    storage = get_storage()
+    session = storage.get_chat_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    message = storage.update_chat_message(session_id, message_id, payload)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
     return message

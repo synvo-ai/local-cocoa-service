@@ -10,6 +10,7 @@ from email.utils import getaddresses, parsedate_to_datetime
 import imaplib
 import logging
 import poplib
+import smtplib
 import re
 import shutil
 import uuid
@@ -30,10 +31,10 @@ from .models import (
     EmailMessageRecord,
     EmailMessageSummary,
     EmailMessageContent,
+    EmailSendRequest,
     EmailSyncRequest,
     EmailSyncResult,
 )
-from core.models import FolderRecord
 from services.storage import IndexStorage
 from .storage import EmailMixin
 from .outlook import (
@@ -203,8 +204,10 @@ class EmailService(EmailMixin):
 
         # Also remove the folder record from storage if it exists
         # This triggers the ON DELETE CASCADE for files and chunks
-        if self.get_folder(folder_id):
-            self.remove_folder(folder_id)
+        with self.connect() as conn:
+            exists = conn.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone()
+            if exists:
+                conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
 
         if folder_path.exists():
             shutil.rmtree(folder_path, ignore_errors=True)
@@ -403,6 +406,86 @@ class EmailService(EmailMixin):
             raise EmailServiceError("Email file missing from disk.")
         return EmailMessageContent(**summary.model_dump(), markdown=markdown)
 
+    # ── Sending ─────────────────────────────────────────────────────────
+
+    # Common IMAP-to-SMTP host mapping for major providers
+    _SMTP_HOST_MAP: dict[str, tuple[str, int]] = {
+        "imap.gmail.com": ("smtp.gmail.com", 587),
+        "imap.mail.yahoo.com": ("smtp.mail.yahoo.com", 587),
+        "imap-mail.outlook.com": ("smtp-mail.outlook.com", 587),
+        "outlook.office365.com": ("smtp.office365.com", 587),
+        "imap.zoho.com": ("smtp.zoho.com", 587),
+        "imap.qq.com": ("smtp.qq.com", 465),
+        "imap.163.com": ("smtp.163.com", 465),
+        "imap.126.com": ("smtp.126.com", 465),
+    }
+
+    def _resolve_smtp(self, account: EmailAccount) -> tuple[str, int]:
+        """Derive SMTP host/port from the IMAP/POP3 host."""
+        host = (account.host or "").lower().strip()
+        if host in self._SMTP_HOST_MAP:
+            return self._SMTP_HOST_MAP[host]
+        # Generic fallback: replace imap/pop with smtp
+        smtp_host = host.replace("imap.", "smtp.").replace("pop.", "smtp.").replace("pop3.", "smtp.")
+        return smtp_host, 587
+
+    async def send_email(self, request: EmailSendRequest) -> dict[str, str]:
+        """Send an email using the credentials of the given account."""
+        account = self.get_email_account(request.account_id)
+        if not account:
+            raise EmailAccountNotFound("Email account not found.")
+
+        if account.protocol == "outlook":
+            return await self._send_outlook(account, request)
+        elif account.protocol in ("imap", "pop3"):
+            return self._send_smtp(account, request)
+        else:
+            raise EmailServiceError(f"Sending not supported for protocol: {account.protocol}")
+
+    def _send_smtp(self, account: EmailAccount, request: EmailSendRequest) -> dict[str, str]:
+        """Send via SMTP using the account's stored credentials."""
+        smtp_host, smtp_port = self._resolve_smtp(account)
+        password = self._decode_secret(account.secret)
+
+        msg = EmailMessage()
+        msg["From"] = account.username
+        msg["To"] = ", ".join(request.to)
+        msg["Subject"] = request.subject
+        msg.set_content(request.body)
+
+        try:
+            if smtp_port == 465:
+                server = smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=30)
+            else:
+                server = smtplib.SMTP(smtp_host, smtp_port, timeout=30)
+                server.starttls()
+            server.login(account.username, password)
+            server.send_message(msg)
+            server.quit()
+            logger.info("SMTP email sent from %s to %s", account.username, request.to)
+            return {"status": "sent", "from": account.username, "to": request.to}
+        except smtplib.SMTPAuthenticationError as exc:
+            raise EmailServiceError(
+                "SMTP authentication failed. For Gmail, you may need an App Password."
+            ) from exc
+        except Exception as exc:
+            raise EmailServiceError(f"Failed to send email: {exc}") from exc
+
+    async def _send_outlook(self, account: EmailAccount, request: EmailSendRequest) -> dict[str, str]:
+        """Send via Microsoft Graph API."""
+        outlook = OutlookService()
+        client_id = account.client_id or OUTLOOK_DEFAULT_CLIENT_ID
+        tenant_id = account.tenant_id or OUTLOOK_DEFAULT_TENANT_ID
+        await outlook.send_message(
+            client_id=client_id,
+            tenant_id=tenant_id,
+            to_recipients=request.to,
+            subject=request.subject,
+            body=request.body,
+            username=account.username,
+        )
+        return {"status": "sent", "from": account.username, "to": request.to}
+
     def _sync_account_blocking(self, account: EmailAccount, limit: int, folder_path: Path) -> EmailSyncResult:
         secret = self._decode_secret(account.secret)
         existing_ids = set(self.list_email_message_ids(account.id))
@@ -595,29 +678,33 @@ class EmailService(EmailMixin):
         folder_path = self._account_spool_path(account.id)
         folder_path.mkdir(parents=True, exist_ok=True)
 
-        existing = self.get_folder(self._folder_id(account))
+        folder_id = self._folder_id(account)
         now = dt.datetime.now(dt.timezone.utc)
-        if existing:
-            record = FolderRecord(
-                id=existing.id,
-                path=folder_path,
-                label=existing.label,
-                created_at=existing.created_at,
-                updated_at=now,
-                last_indexed_at=existing.last_indexed_at,
-                enabled=True,
-            )
-        else:
-            record = FolderRecord(
-                id=self._folder_id(account),
-                path=folder_path,
-                label=f"Email · {account.label}",
-                created_at=now,
-                updated_at=now,
-                last_indexed_at=None,
-                enabled=True,
-            )
-        self.upsert_folder(record)
+
+        with self.connect() as conn:
+            row = conn.execute(
+                "SELECT id, label, created_at, last_indexed_at FROM folders WHERE id = ?",
+                (folder_id,),
+            ).fetchone()
+
+            if row:
+                conn.execute(
+                    """UPDATE folders SET path=?, updated_at=?, enabled=1 WHERE id=?""",
+                    (str(folder_path), now.isoformat(), folder_id),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO folders (id, path, label, created_at, updated_at, last_indexed_at, enabled)
+                       VALUES (?, ?, ?, ?, ?, ?, 1)""",
+                    (
+                        folder_id,
+                        str(folder_path),
+                        f"Email · {account.label}",
+                        now.isoformat(),
+                        now.isoformat(),
+                        None,
+                    ),
+                )
         return folder_path
 
     def _to_summary(self, account: EmailAccount, folder_path: Path) -> EmailAccountSummary:

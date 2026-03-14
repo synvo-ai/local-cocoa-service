@@ -2,8 +2,9 @@ from services.drive import files_router as files
 from services.drive import folders_router as folders
 from services.indexer import router as index
 from services.search import router as search
+from services.agent import router as agent_router
 from services.memory import router as memory
-from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router
+from routers import chat, health, settings as settings_router, security, plugins as plugins_router, language as language_router, events as events_router, models as models_router, system_status as system_status_router, providers as providers_router
 from core.context import get_indexer, get_storage
 from core.config import settings
 from core.models import FolderRecord
@@ -102,6 +103,7 @@ app.include_router(files)
 app.include_router(search.router)
 app.include_router(memory)
 app.include_router(chat.router)
+app.include_router(agent_router.router)
 app.include_router(settings_router.router)
 app.include_router(security.router)
 app.include_router(plugins_router.router)
@@ -109,6 +111,7 @@ app.include_router(language_router.router)
 app.include_router(events_router.router)
 app.include_router(models_router.router)
 app.include_router(system_status_router.router)
+app.include_router(providers_router.router)
 
 _poll_task: asyncio.Task | None = None
 _startup_refresh_task: asyncio.Task | None = None
@@ -227,6 +230,7 @@ async def on_startup() -> None:
     # Start managed models (VLM, Embedding, etc.)
     from core.model_manager import get_model_manager
     manager = get_model_manager()
+    manager.start_manager_loop()  # Added to ensure hibernation works
     asyncio.create_task(manager.start_all_models())
 
 

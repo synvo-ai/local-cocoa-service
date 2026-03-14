@@ -448,6 +448,10 @@ class ChatMessage(BaseModel):
     # Multi-path thinking steps
     is_multi_path: Optional[bool] = Field(default=None, alias="isMultiPath")
     thinking_steps: Optional[list[dict[str, Any]]] = Field(default=None, alias="thinkingSteps")
+    needs_user_decision: Optional[bool] = Field(default=None, alias="needsUserDecision")
+    resume_token: Optional[str] = Field(default=None, alias="resumeToken")
+    decision_message: Optional[str] = Field(default=None, alias="decisionMessage")
+    tool_calls: Optional[list[dict[str, Any]]] = Field(default=None, alias="toolCalls")
 
 
 class ChatSession(BaseModel):
@@ -472,6 +476,26 @@ class ChatMessageCreate(BaseModel):
     # Multi-path thinking steps
     is_multi_path: Optional[bool] = Field(default=None, alias="isMultiPath")
     thinking_steps: Optional[list[dict[str, Any]]] = Field(default=None, alias="thinkingSteps")
+    needs_user_decision: Optional[bool] = Field(default=None, alias="needsUserDecision")
+    resume_token: Optional[str] = Field(default=None, alias="resumeToken")
+    decision_message: Optional[str] = Field(default=None, alias="decisionMessage")
+    tool_calls: Optional[list[dict[str, Any]]] = Field(default=None, alias="toolCalls")
+
+
+class ChatMessageUpdate(BaseModel):
+    model_config = {"populate_by_name": True}
+
+    role: Optional[Literal["user", "assistant", "system"]] = None
+    content: Optional[str] = None
+    timestamp: Optional[dt.datetime] = None
+    meta: Optional[str] = None
+    references: Optional[list[SearchHit]] = None
+    is_multi_path: Optional[bool] = Field(default=None, alias="isMultiPath")
+    thinking_steps: Optional[list[dict[str, Any]]] = Field(default=None, alias="thinkingSteps")
+    needs_user_decision: Optional[bool] = Field(default=None, alias="needsUserDecision")
+    resume_token: Optional[str] = Field(default=None, alias="resumeToken")
+    decision_message: Optional[str] = Field(default=None, alias="decisionMessage")
+    tool_calls: Optional[list[dict[str, Any]]] = Field(default=None, alias="toolCalls")
 
 
 class ApiKey(BaseModel):

@@ -4,6 +4,8 @@ Entry point for PyInstaller-packaged Local Cocoa backend.
 This allows the FastAPI app to run as a standalone executable.
 """
 import os
+import sys
+from pathlib import Path
 
 
 def main():
@@ -59,10 +61,17 @@ def main():
 
     from app.core.config import settings
 
-    if settings.is_dev and not getattr(sys, 'frozen', False):  # Only reload when not frozen and in debug mode
-        uvicorn.run("app.app:app", host=settings.endpoints.main_host, port=settings.endpoints.main_port, reload=True)
-    else:
-        uvicorn.run("app.app:app", host=settings.endpoints.main_host, port=settings.endpoints.main_port, reload=False)
+    # UVICORN_RELOAD env var controls reload explicitly. Defaults to False.
+    # Reload mode spawns a child process that needs its own PYTHONPATH setup,
+    # which is fragile with debugpy. Use reload only when running from terminal directly.
+    use_reload = os.getenv("UVICORN_RELOAD", "false").lower() == "true"
+
+    uvicorn.run(
+        "app.app:app",
+        host=settings.endpoints.main_host,
+        port=settings.endpoints.main_port,
+        reload=use_reload,
+    )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status, FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from .models import (
     EmailSyncResult,
 )
 
+logger = logging.getLogger(__name__)
 router = APIRouter(tags=["plugin-mail"])
 
 
@@ -150,7 +152,9 @@ async def complete_outlook_setup(
     try:
         return await service.complete_outlook_setup(payload.flow_id, payload.label)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.exception("Outlook complete failed for flow %s", payload.flow_id)
+        detail = str(e) or repr(e) or "Unknown error completing Outlook setup"
+        raise HTTPException(status_code=400, detail=detail)
 
 
 @router.get("/accounts", response_model=list[EmailAccountSummary])

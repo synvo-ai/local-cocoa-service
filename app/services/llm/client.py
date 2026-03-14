@@ -448,6 +448,77 @@ class LlmClient:
 
         raise RuntimeError("Failed to obtain chat completion from configured LLM endpoint(s): " + "; ".join(errors))
 
+    async def chat_complete_with_tools(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        *,
+        max_tokens: int = 1024,
+        temperature: float | None = None,
+    ) -> dict[str, Any]:
+        """Non-streaming chat completion with OpenAI-style tool/function calling.
+
+        Returns the full ``choices[0].message`` dict which may contain
+        ``tool_calls`` if the model decides to invoke a tool, or plain
+        ``content`` for a text response.
+        """
+        await get_model_manager().ensure_model(ModelType.VISION)
+
+        payload: dict[str, Any] = {
+            "messages": messages,
+            "max_tokens": min(max_tokens, settings.llm_context_tokens),
+            "stream": False,
+            "tools": tools,
+        }
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        base = settings.endpoints.llm_url.rstrip("/")
+        endpoints: list[str] = [
+            f"{base}/v1/chat/completions",
+            f"{base}/chat/completions",
+        ]
+
+        errors: list[str] = []
+        logger.info(
+            "🔧 Chat+Tools Request: messages=%d, tools=%d, max_tokens=%d",
+            len(messages), len(tools), max_tokens,
+        )
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for endpoint in endpoints:
+                for attempt in range(_503_MAX_RETRIES + 1):
+                    try:
+                        response = await client.post(endpoint, json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+
+                        if "choices" in data and len(data["choices"]) > 0:
+                            message = data["choices"][0].get("message", {})
+                            return message
+
+                        if "content" in data:
+                            return {"role": "assistant", "content": data["content"]}
+
+                        raise ValueError("Unexpected chat+tools response schema")
+                    except httpx.HTTPStatusError as exc:
+                        delay = await _should_retry_503(exc, attempt)
+                        if delay is not None:
+                            await asyncio.sleep(delay)
+                            continue
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                    except (httpx.HTTPError, ValueError) as exc:
+                        errors.append(f"{endpoint}: {exc}")
+                        break
+                else:
+                    continue
+                break
+
+        raise RuntimeError(
+            "Failed to obtain chat+tools completion: " + "; ".join(errors)
+        )
+
     async def describe_frames(
         self,
         frames: Sequence[bytes],

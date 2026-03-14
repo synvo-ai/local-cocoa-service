@@ -123,3 +123,10 @@ class EmailMessageSummary(BaseModel):
 
 class EmailMessageContent(EmailMessageSummary):
     markdown: str
+
+
+class EmailSendRequest(BaseModel):
+    account_id: str
+    to: List[str]
+    subject: str
+    body: str
