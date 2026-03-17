@@ -147,18 +147,18 @@ class FileRecord(BaseModel):
     index_status: FileIndexStatus = "pending"
     error_reason: Optional[str] = None
     error_at: Optional[dt.datetime] = None
-    
+
     # Two-round indexing stages
     # Round 1 (Fast): 0=pending, 1=text_done, 2=embed_done, -1=error
     fast_stage: int = 0
     fast_text_at: Optional[dt.datetime] = None
     fast_embed_at: Optional[dt.datetime] = None
-    
+
     # Round 2 (Deep): 0=pending, 1=text_done, 2=embed_done, -1=error, -2=skipped
     deep_stage: int = 0
     deep_text_at: Optional[dt.datetime] = None
     deep_embed_at: Optional[dt.datetime] = None
-    
+
     # Memory extraction status: 'pending', 'extracting', 'extracted', 'skipped', 'error'
     memory_status: Literal["pending", "extracting", "extracted", "skipped", "error"] = "pending"
     memory_extracted_at: Optional[dt.datetime] = None
@@ -427,12 +427,6 @@ class IngestArtifact(BaseModel):
     text: str
     chunks: List[ChunkSnapshot] = Field(default_factory=list)
     page_mapping: List[tuple[int, int, int]] = Field(default_factory=list)  # For PDF page tracking
-
-
-
-
-
-
 
 
 class ChatMessage(BaseModel):

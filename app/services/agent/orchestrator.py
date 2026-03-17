@@ -45,8 +45,8 @@ def _emit(event: AgentEvent) -> str:
     return event.model_dump_json() + "\n"
 
 
-def _thinking(title: str, *, summary: str = "", step_type: str = "info", elapsed_ms: int = 0) -> str:
-    return _emit(AgentEvent(
+def _thinking_event(title: str, *, summary: str = "", step_type: str = "info", elapsed_ms: int = 0) -> AgentEvent:
+    return AgentEvent(
         type="thinking_step",
         data={
             "id": uuid.uuid4().hex[:8],
@@ -56,26 +56,32 @@ def _thinking(title: str, *, summary: str = "", step_type: str = "info", elapsed
             "status": "complete",
             "timestamp_ms": elapsed_ms,
         },
-    ))
+    )
 
 
 class AgentOrchestrator:
     """Runs the agent loop: LLM -> tool calls -> tool results -> repeat."""
 
-    def __init__(self, llm: LlmClient, registry: ToolRegistry) -> None:
+    def __init__(self, llm: LlmClient, registry: ToolRegistry, *, approval_mode: str = "require_confirmation") -> None:
         self.llm = llm
         self.registry = registry
+        self.approval_mode = approval_mode
 
     async def run(self, request: AgentRequest) -> AsyncGenerator[str, None]:
         """Execute the agent loop and yield NDJSON events."""
+        async for event in self.run_events(request):
+            yield _emit(event)
+
+    async def run_events(self, request: AgentRequest) -> AsyncGenerator[AgentEvent, None]:
+        """Execute the agent loop and yield structured events."""
         t0 = time.perf_counter()
-        yield _emit(AgentEvent(type="status", data="agent_starting"))
+        yield AgentEvent(type="status", data="agent_starting")
 
         specs = self.registry.specs
 
         # Build message history with fallback prompt (prompt-based tool calling)
         messages: list[dict[str, Any]] = []
-        system_prompt = build_system_prompt_with_fallback(specs)
+        system_prompt = build_system_prompt_with_fallback(specs, approval_mode=self.approval_mode)
         messages.append({"role": "system", "content": system_prompt})
 
         # Add conversation history (if any)
@@ -90,7 +96,7 @@ class AgentOrchestrator:
         def _elapsed() -> int:
             return int((time.perf_counter() - t0) * 1000)
 
-        yield _thinking("Analyzing your request...", step_type="analyze", elapsed_ms=_elapsed())
+        yield _thinking_event("Analyzing your request...", step_type="analyze", elapsed_ms=_elapsed())
 
         for iteration in range(request.max_iterations):
             logger.info("Agent iteration %d/%d", iteration + 1, request.max_iterations)
@@ -100,8 +106,8 @@ class AgentOrchestrator:
                 tool_calls, assistant_text = await self._call_fallback(messages)
             except Exception as exc:
                 logger.error("Agent LLM call failed: %s", exc)
-                yield _emit(AgentEvent(type="error", data=str(exc)))
-                yield _emit(AgentEvent(type="done"))
+                yield AgentEvent(type="error", data=str(exc))
+                yield AgentEvent(type="done")
                 return
 
             # -- No tool calls -> final answer ----------------------------
@@ -121,11 +127,11 @@ class AgentOrchestrator:
                     })
                     continue
 
-                yield _emit(AgentEvent(type="status", data="answering"))
+                yield AgentEvent(type="status", data="answering")
                 if assistant_text:
-                    yield _emit(AgentEvent(type="token", data=assistant_text))
-                yield _thinking("Done", step_type="synthesize", elapsed_ms=_elapsed())
-                yield _emit(AgentEvent(type="done"))
+                    yield AgentEvent(type="token", data=assistant_text)
+                yield _thinking_event("Done", step_type="synthesize", elapsed_ms=_elapsed())
+                yield AgentEvent(type="done")
                 return
 
             # -- Execute tool calls ---------------------------------------
@@ -136,24 +142,24 @@ class AgentOrchestrator:
 
             has_pending = False
             for tc in tool_calls:
-                yield _thinking(
+                yield _thinking_event(
                     f"Using {tc.tool_name}...",
                     summary=json.dumps(tc.arguments, ensure_ascii=False)[:200],
                     step_type="search",
                     elapsed_ms=_elapsed(),
                 )
-                yield _emit(AgentEvent(type="tool_call", data={
+                yield AgentEvent(type="tool_call", data={
                     "tool": tc.tool_name,
                     "args": tc.arguments,
                     "call_id": tc.id,
-                }))
+                })
 
-                result: ToolResult = await self.registry.execute(tc)
+                result: ToolResult = await self.registry.execute(tc, approval_mode=self.approval_mode)
                 pending_confirmation = _parse_pending_confirmation(result.output)
                 if pending_confirmation is not None:
                     has_pending = True
 
-                yield _emit(AgentEvent(type="tool_result", data={
+                yield AgentEvent(type="tool_result", data={
                     "call_id": result.call_id,
                     "tool": result.tool_name,
                     "success": result.success,
@@ -161,7 +167,7 @@ class AgentOrchestrator:
                     "requires_confirmation": pending_confirmation is not None,
                     "confirmation_id": pending_confirmation.get("confirmation_id") if pending_confirmation else None,
                     "confirmation_message": pending_confirmation.get("message") if pending_confirmation else None,
-                }))
+                })
 
                 if pending_confirmation is None:
                     messages.append({
@@ -171,14 +177,14 @@ class AgentOrchestrator:
                     })
 
             if has_pending:
-                yield _thinking("Waiting for your confirmation...", step_type="synthesize", elapsed_ms=_elapsed())
-                yield _emit(AgentEvent(type="done"))
+                yield _thinking_event("Waiting for your confirmation...", step_type="synthesize", elapsed_ms=_elapsed())
+                yield AgentEvent(type="done")
                 return
 
             # -- Detect repeated identical calls (loop guard) -------------
             if iteration >= 2 and self._is_repeating(messages):
                 logger.warning("Detected repeating tool calls, forcing final answer")
-                yield _thinking("Preparing final answer...", step_type="synthesize", elapsed_ms=_elapsed())
+                yield _thinking_event("Preparing final answer...", step_type="synthesize", elapsed_ms=_elapsed())
                 break
 
         # Max iterations reached or loop broken -> stream a final answer
@@ -186,11 +192,11 @@ class AgentOrchestrator:
             "role": "user",
             "content": "Please provide your final answer now based on all the information you have gathered.",
         })
-        yield _emit(AgentEvent(type="status", data="answering"))
+        yield AgentEvent(type="status", data="answering")
         async for chunk in self._stream_final_answer(messages):
-            yield _emit(AgentEvent(type="token", data=chunk))
-        yield _thinking("Done", step_type="synthesize", elapsed_ms=_elapsed())
-        yield _emit(AgentEvent(type="done"))
+            yield AgentEvent(type="token", data=chunk)
+        yield _thinking_event("Done", step_type="synthesize", elapsed_ms=_elapsed())
+        yield AgentEvent(type="done")
 
     # -- LLM call strategies ----------------------------------------------
 

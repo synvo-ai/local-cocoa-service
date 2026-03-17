@@ -83,7 +83,13 @@ class ToolRegistry:
 
     # ── Execution ───────────────────────────────────────────────────────
 
-    async def execute(self, call: ToolCall, *, max_output_chars: int = 8000) -> ToolResult:
+    async def execute(
+        self,
+        call: ToolCall,
+        *,
+        max_output_chars: int = 8000,
+        approval_mode: str = "require_confirmation",
+    ) -> ToolResult:
         """Execute a tool call and return a bounded result.
 
         Side-effect tools (``side_effect=True``) are NOT executed immediately.
@@ -102,19 +108,28 @@ class ToolRegistry:
         # Gate side-effect tools behind confirmation
         spec = self.get_spec(call.tool_name)
         if spec and spec.side_effect:
-            cid = store_pending_action(call.tool_name, call.arguments)
-            pending_result = json.dumps({
-                "status": "pending_confirmation",
-                "confirmation_id": cid,
-                "tool": call.tool_name,
-                "message": f"This action requires your confirmation before it can be executed.",
-            })
-            return ToolResult(
-                call_id=call.id,
-                tool_name=call.tool_name,
-                success=True,
-                output=pending_result,
-            )
+            if approval_mode == "deny_side_effects":
+                return ToolResult(
+                    call_id=call.id,
+                    tool_name=call.tool_name,
+                    success=False,
+                    output=f"Tool '{call.tool_name}' requires approval and is not allowed in this mode.",
+                )
+
+            if approval_mode == "require_confirmation":
+                cid = store_pending_action(call.tool_name, call.arguments)
+                pending_result = json.dumps({
+                    "status": "pending_confirmation",
+                    "confirmation_id": cid,
+                    "tool": call.tool_name,
+                    "message": f"This action requires your confirmation before it can be executed.",
+                })
+                return ToolResult(
+                    call_id=call.id,
+                    tool_name=call.tool_name,
+                    success=True,
+                    output=pending_result,
+                )
 
         try:
             raw = await executor(call.arguments)

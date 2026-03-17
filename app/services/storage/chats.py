@@ -195,7 +195,7 @@ class ChatMixin:
         is_multi_path = None
         if "is_multi_path" in row.keys() and row["is_multi_path"] is not None:
             is_multi_path = bool(row["is_multi_path"])
-        
+
         thinking_steps = None
         if "thinking_steps" in row.keys() and row["thinking_steps"]:
             thinking_steps = ChatMixin._deserialize_thinking_steps(row["thinking_steps"])
@@ -205,7 +205,7 @@ class ChatMixin:
         tool_calls = None
         if "tool_calls" in row.keys() and row["tool_calls"]:
             tool_calls = ChatMixin._deserialize_json_list(row["tool_calls"])
-        
+
         return ChatMessage(
             id=row["id"],
             session_id=row["session_id"],

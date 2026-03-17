@@ -15,6 +15,49 @@ class AgentRequest(BaseModel):
     max_iterations: int = Field(default=10, ge=1, le=20)
 
 
+class ExternalAgentRunRequest(AgentRequest):
+    """Incoming request to create an externally-pollable agent run."""
+
+
+AgentRunStatus = Literal["queued", "running", "completed", "failed"]
+
+
+class AgentRunCreated(BaseModel):
+    """Response returned when an external agent run is created."""
+    run_id: str
+    status: AgentRunStatus
+
+
+class AgentRunEventRecord(BaseModel):
+    """Persisted external event record for polling clients."""
+    seq: int
+    timestamp_ms: int
+    event: "AgentEvent"
+
+
+class AgentRunState(BaseModel):
+    """Current state of an external agent run."""
+    run_id: str
+    status: AgentRunStatus
+    query: str
+    created_at_ms: int
+    updated_at_ms: int
+    completed_at_ms: Optional[int] = None
+    current_phase: str = "queued"
+    latest_message: Optional[str] = None
+    final_answer: str = ""
+    error: Optional[str] = None
+    events_count: int = 0
+
+
+class AgentRunEventsResponse(BaseModel):
+    """Polled event batch for an external agent run."""
+    run_id: str
+    status: AgentRunStatus
+    next_seq: int
+    events: list[AgentRunEventRecord] = Field(default_factory=list)
+
+
 # ── Tool Contract ───────────────────────────────────────────────────────
 
 class ToolParameter(BaseModel):

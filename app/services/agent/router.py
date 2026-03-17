@@ -1,18 +1,25 @@
-"""FastAPI router for agent mode – ``POST /agent/stream``."""
+"""FastAPI router for agent mode – UI stream + external pollable runs."""
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from core.context import get_llm_client
 
 from .executor import TOOL_EXECUTORS
-from .models import AgentRequest
+from .models import (
+    AgentRequest,
+    AgentRunCreated,
+    AgentRunEventsResponse,
+    AgentRunState,
+    ExternalAgentRunRequest,
+)
 from .orchestrator import AgentOrchestrator
+from .run_manager import AgentRunManager
 from .registry import ToolRegistry, pop_pending_action
 
 logger = logging.getLogger(__name__)
@@ -22,6 +29,7 @@ router = APIRouter(tags=["agent"])
 # ── Singleton registry, initialised once ────────────────────────────────
 
 _registry: ToolRegistry | None = None
+_run_manager: AgentRunManager | None = None
 
 
 def _get_registry() -> ToolRegistry:
@@ -31,6 +39,13 @@ def _get_registry() -> ToolRegistry:
         for name, fn in TOOL_EXECUTORS.items():
             _registry.register(name, fn)
     return _registry
+
+
+def _get_run_manager() -> AgentRunManager:
+    global _run_manager
+    if _run_manager is None:
+        _run_manager = AgentRunManager()
+    return _run_manager
 
 
 # ── Endpoints ───────────────────────────────────────────────────────────
@@ -47,12 +62,50 @@ async def agent_stream(payload: AgentRequest) -> StreamingResponse:
 
     llm = get_llm_client()
     registry = _get_registry()
-    orchestrator = AgentOrchestrator(llm, registry)
+    orchestrator = AgentOrchestrator(llm, registry, approval_mode="require_confirmation")
 
     return StreamingResponse(
         orchestrator.run(payload),
         media_type="application/x-ndjson",
     )
+
+
+@router.post("/agent/external/runs", response_model=AgentRunCreated)
+async def create_external_run(payload: ExternalAgentRunRequest) -> AgentRunCreated:
+    """Create an externally-pollable agent run with auto-executing side effects."""
+    logger.info("POST /agent/external/runs: query=%s", payload.query[:120])
+
+    llm = get_llm_client()
+    registry = _get_registry()
+    run_manager = _get_run_manager()
+
+    created = await run_manager.create_run(payload)
+    await run_manager.start_run(created.run_id, llm, registry)
+    return created
+
+
+@router.get("/agent/external/runs/{run_id}", response_model=AgentRunState)
+async def get_external_run(run_id: str) -> AgentRunState:
+    """Get the latest state for an external agent run."""
+    run_manager = _get_run_manager()
+    try:
+        return await run_manager.get_run(run_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
+
+
+@router.get("/agent/external/runs/{run_id}/events", response_model=AgentRunEventsResponse)
+async def get_external_run_events(
+    run_id: str,
+    after_seq: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=1000),
+) -> AgentRunEventsResponse:
+    """Poll structured events for an external agent run."""
+    run_manager = _get_run_manager()
+    try:
+        return await run_manager.get_events(run_id, after_seq=after_seq, limit=limit)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Run not found.") from exc
 
 
 # ── Tool confirmation ───────────────────────────────────────────────────
