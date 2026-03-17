@@ -16,6 +16,8 @@ from .models import (
     AgentRunCreated,
     AgentRunEventsResponse,
     AgentRunState,
+    ExternalRunCancelRequest,
+    ExternalRunConfirmRequest,
     ExternalAgentRunRequest,
 )
 from .orchestrator import AgentOrchestrator
@@ -72,7 +74,7 @@ async def agent_stream(payload: AgentRequest) -> StreamingResponse:
 
 @router.post("/agent/external/runs", response_model=AgentRunCreated)
 async def create_external_run(payload: ExternalAgentRunRequest) -> AgentRunCreated:
-    """Create an externally-pollable agent run with auto-executing side effects."""
+    """Create an externally-pollable agent run."""
     logger.info("POST /agent/external/runs: query=%s", payload.query[:120])
 
     llm = get_llm_client()
@@ -106,6 +108,30 @@ async def get_external_run_events(
         return await run_manager.get_events(run_id, after_seq=after_seq, limit=limit)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Run not found.") from exc
+
+
+@router.post("/agent/external/runs/{run_id}/confirm", response_model=AgentRunState)
+async def confirm_external_run(run_id: str, payload: ExternalRunConfirmRequest) -> AgentRunState:
+    """Confirm a pending run-scoped action, optionally editing fields first."""
+    llm = get_llm_client()
+    registry = _get_registry()
+    run_manager = _get_run_manager()
+    try:
+        return await run_manager.confirm_run(run_id, payload.confirmation_id, payload.overrides, llm, registry)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Pending action not found.") from exc
+
+
+@router.post("/agent/external/runs/{run_id}/cancel", response_model=AgentRunState)
+async def cancel_external_run(run_id: str, payload: ExternalRunCancelRequest) -> AgentRunState:
+    """Cancel a pending run-scoped action and continue the run."""
+    llm = get_llm_client()
+    registry = _get_registry()
+    run_manager = _get_run_manager()
+    try:
+        return await run_manager.cancel_run(run_id, payload.confirmation_id, llm, registry)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Pending action not found.") from exc
 
 
 # ── Tool confirmation ───────────────────────────────────────────────────

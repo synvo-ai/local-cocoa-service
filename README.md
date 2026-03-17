@@ -4,6 +4,39 @@
 
 `local-cocoa-server` is the backend service for local-cocoa, offering convenient APIs.
 
+## Standalone CLI
+
+The service now includes a standalone CLI under `cli/` for headless and operator-driven use.
+
+Start the interactive shell:
+
+```bash
+python -m cli
+```
+
+or use the bootstrap shell script (activates venv and installs deps automatically):
+
+```bash
+./scripts/start_cli.sh
+```
+
+Useful examples:
+
+```bash
+python -m cli status
+python -m cli folders add ~/Documents --label Docs
+python -m cli index run
+python -m cli index semantic --on
+python -m cli index deep --on
+python -m cli providers show
+python -m cli mail list
+python -m cli mail add-standard
+python -m cli mail add-outlook
+python -m cli keys create external-client
+```
+
+The CLI reuses the existing FastAPI service and current runtime state. It does not write directly to the index database or Qdrant data.
+
 ---
 
 ## Build Guild

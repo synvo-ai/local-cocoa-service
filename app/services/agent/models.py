@@ -17,15 +17,28 @@ class AgentRequest(BaseModel):
 
 class ExternalAgentRunRequest(AgentRequest):
     """Incoming request to create an externally-pollable agent run."""
+    approval_mode: "AgentApprovalMode" = "require_confirmation"
 
 
-AgentRunStatus = Literal["queued", "running", "completed", "failed"]
+AgentApprovalMode = Literal["require_confirmation", "run_confirmation", "auto_execute", "deny_side_effects"]
+AgentRunStatus = Literal["queued", "running", "awaiting_confirmation", "completed", "failed", "cancelled"]
 
 
 class AgentRunCreated(BaseModel):
     """Response returned when an external agent run is created."""
     run_id: str
     status: AgentRunStatus
+
+
+class PendingRunAction(BaseModel):
+    """Run-scoped pending action awaiting confirmation."""
+    confirmation_id: str
+    call_id: str
+    tool: str
+    message: str
+    args: dict[str, Any] = Field(default_factory=dict)
+    editable_fields: list[str] = Field(default_factory=list)
+    confirm_status: Literal["pending", "confirmed", "cancelled"] = "pending"
 
 
 class AgentRunEventRecord(BaseModel):
@@ -48,6 +61,8 @@ class AgentRunState(BaseModel):
     final_answer: str = ""
     error: Optional[str] = None
     events_count: int = 0
+    approval_mode: AgentApprovalMode = "require_confirmation"
+    pending_action: Optional[PendingRunAction] = None
 
 
 class AgentRunEventsResponse(BaseModel):
@@ -56,6 +71,24 @@ class AgentRunEventsResponse(BaseModel):
     status: AgentRunStatus
     next_seq: int
     events: list[AgentRunEventRecord] = Field(default_factory=list)
+
+
+class AgentExecutionState(BaseModel):
+    """Internal resumable execution state for agent runs."""
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+    next_iteration: int = 0
+    max_iterations: int = Field(default=10, ge=1, le=20)
+
+
+class ExternalRunConfirmRequest(BaseModel):
+    """Confirm a pending external run action, optionally editing fields first."""
+    confirmation_id: str
+    overrides: dict[str, Any] | None = None
+
+
+class ExternalRunCancelRequest(BaseModel):
+    """Cancel a pending external run action."""
+    confirmation_id: str
 
 
 # ── Tool Contract ───────────────────────────────────────────────────────

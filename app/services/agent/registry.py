@@ -116,6 +116,19 @@ class ToolRegistry:
                     output=f"Tool '{call.tool_name}' requires approval and is not allowed in this mode.",
                 )
 
+            if approval_mode == "run_confirmation":
+                pending_result = json.dumps({
+                    "status": "pending_run_confirmation",
+                    "tool": call.tool_name,
+                    "message": f"This action requires confirmation before it can be executed.",
+                })
+                return ToolResult(
+                    call_id=call.id,
+                    tool_name=call.tool_name,
+                    success=True,
+                    output=pending_result,
+                )
+
             if approval_mode == "require_confirmation":
                 cid = store_pending_action(call.tool_name, call.arguments)
                 pending_result = json.dumps({

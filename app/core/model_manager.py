@@ -389,11 +389,13 @@ class ModelManager:
     async def start_all_models(self) -> None:
         """Starts all configured models."""
         logger.info("Starting all models...")
-        for model_type in self.models.keys():
+        async def start_one(model_type: ModelType) -> None:
             try:
                 await self.ensure_model(model_type)
             except Exception as e:
                 logger.error(f"Failed to start model {model_type}: {e}")
+
+        await asyncio.gather(*(start_one(model_type) for model_type in self.models.keys()))
 
     def is_running(self, model_type: ModelType) -> bool:
         model = self.models.get(model_type)

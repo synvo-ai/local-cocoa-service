@@ -17,7 +17,7 @@ from typing import Any, AsyncGenerator
 
 from services.llm.client import LlmClient
 
-from .models import AgentEvent, AgentRequest, ToolCall, ToolResult
+from .models import AgentEvent, AgentExecutionState, AgentRequest, ToolCall, ToolResult
 from .prompts import build_system_prompt_with_fallback
 from .registry import ToolRegistry
 
@@ -35,7 +35,7 @@ def _parse_pending_confirmation(output: str) -> dict[str, Any] | None:
         parsed = json.loads(output)
     except json.JSONDecodeError:
         return None
-    if isinstance(parsed, dict) and parsed.get("status") == "pending_confirmation":
+    if isinstance(parsed, dict) and parsed.get("status") in {"pending_confirmation", "pending_run_confirmation"}:
         return parsed
     return None
 
@@ -67,6 +67,20 @@ class AgentOrchestrator:
         self.registry = registry
         self.approval_mode = approval_mode
 
+    def create_execution_state(self, request: AgentRequest) -> AgentExecutionState:
+        """Create resumable execution state for a new request."""
+        messages: list[dict[str, Any]] = []
+        system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
+        messages.append({"role": "system", "content": system_prompt})
+
+        for msg in request.conversation_history[-10:]:
+            role = msg.get("role", "user")
+            if role in ("user", "assistant"):
+                messages.append({"role": role, "content": str(msg.get("content", ""))})
+
+        messages.append({"role": "user", "content": request.query})
+        return AgentExecutionState(messages=messages, next_iteration=0, max_iterations=request.max_iterations)
+
     async def run(self, request: AgentRequest) -> AsyncGenerator[str, None]:
         """Execute the agent loop and yield NDJSON events."""
         async for event in self.run_events(request):
@@ -74,32 +88,31 @@ class AgentOrchestrator:
 
     async def run_events(self, request: AgentRequest) -> AsyncGenerator[AgentEvent, None]:
         """Execute the agent loop and yield structured events."""
+        state = self.create_execution_state(request)
+        async for event in self.run_state_events(state, emit_start=True):
+            yield event
+
+    async def run_state_events(
+        self,
+        state: AgentExecutionState,
+        *,
+        emit_start: bool = False,
+    ) -> AsyncGenerator[AgentEvent, None]:
+        """Resume the agent loop from previously saved execution state."""
         t0 = time.perf_counter()
-        yield AgentEvent(type="status", data="agent_starting")
+        messages = state.messages
 
-        specs = self.registry.specs
-
-        # Build message history with fallback prompt (prompt-based tool calling)
-        messages: list[dict[str, Any]] = []
-        system_prompt = build_system_prompt_with_fallback(specs, approval_mode=self.approval_mode)
-        messages.append({"role": "system", "content": system_prompt})
-
-        # Add conversation history (if any)
-        for msg in request.conversation_history[-10:]:
-            role = msg.get("role", "user")
-            if role in ("user", "assistant"):
-                messages.append({"role": role, "content": str(msg.get("content", ""))})
-
-        # Add the current query
-        messages.append({"role": "user", "content": request.query})
+        if emit_start:
+            yield AgentEvent(type="status", data="agent_starting")
 
         def _elapsed() -> int:
             return int((time.perf_counter() - t0) * 1000)
 
-        yield _thinking_event("Analyzing your request...", step_type="analyze", elapsed_ms=_elapsed())
+        if emit_start:
+            yield _thinking_event("Analyzing your request...", step_type="analyze", elapsed_ms=_elapsed())
 
-        for iteration in range(request.max_iterations):
-            logger.info("Agent iteration %d/%d", iteration + 1, request.max_iterations)
+        for iteration in range(state.next_iteration, state.max_iterations):
+            logger.info("Agent iteration %d/%d", iteration + 1, state.max_iterations)
 
             # -- Call LLM (fallback mode) ---------------------------------
             try:
@@ -112,7 +125,7 @@ class AgentOrchestrator:
 
             # -- No tool calls -> final answer ----------------------------
             if not tool_calls:
-                if iteration < request.max_iterations - 1 and self._should_retry_for_missed_send_email(messages, assistant_text):
+                if iteration < state.max_iterations - 1 and self._should_retry_for_missed_send_email(messages, assistant_text):
                     logger.info("Retrying agent turn because model narrated send_email without a tool call")
                     if assistant_text:
                         messages.append({"role": "assistant", "content": assistant_text})
@@ -175,6 +188,8 @@ class AgentOrchestrator:
                         "tool_call_id": tc.id,
                         "content": result.output,
                     })
+
+            state.next_iteration = iteration + 1
 
             if has_pending:
                 yield _thinking_event("Waiting for your confirmation...", step_type="synthesize", elapsed_ms=_elapsed())
