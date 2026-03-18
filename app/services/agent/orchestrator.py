@@ -18,7 +18,7 @@ from typing import Any, AsyncGenerator
 from services.llm.client import LlmClient
 
 from .models import AgentEvent, AgentExecutionState, AgentRequest, ToolCall, ToolResult
-from .prompts import build_system_prompt_with_fallback
+from .prompts import build_system_prompt, build_system_prompt_with_fallback
 from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -70,7 +70,17 @@ class AgentOrchestrator:
     def create_execution_state(self, request: AgentRequest) -> AgentExecutionState:
         """Create resumable execution state for a new request."""
         messages: list[dict[str, Any]] = []
-        system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
+        # Use clean prompt for native function calling (no <tool_call> text instructions)
+        from core.provider_config import is_llm_remote, get_remote_llm_config
+        use_native_prompt = False
+        if is_llm_remote():
+            cfg = get_remote_llm_config()
+            use_native_prompt = cfg.provider_hint == "gemini" or "generativelanguage.googleapis.com" in cfg.base_url
+
+        if use_native_prompt:
+            system_prompt = build_system_prompt(self.registry.specs, approval_mode=self.approval_mode)
+        else:
+            system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
         messages.append({"role": "system", "content": system_prompt})
 
         for msg in request.conversation_history[-10:]:
@@ -114,9 +124,23 @@ class AgentOrchestrator:
         for iteration in range(state.next_iteration, state.max_iterations):
             logger.info("Agent iteration %d/%d", iteration + 1, state.max_iterations)
 
-            # -- Call LLM (fallback mode) ---------------------------------
+            # -- Call LLM (Gemini native / OpenAI native / prompt-based fallback) --
             try:
-                tool_calls, assistant_text = await self._call_fallback(messages)
+                from core.provider_config import is_llm_remote, get_remote_llm_config
+                call_mode = "fallback"
+                if is_llm_remote():
+                    cfg = get_remote_llm_config()
+                    if cfg.provider_hint == "gemini" or "generativelanguage.googleapis.com" in cfg.base_url:
+                        call_mode = "gemini_native"
+                    elif cfg.provider_hint == "openai" and "openai.azure.com" not in cfg.base_url:
+                        call_mode = "openai_native"
+
+                if call_mode == "gemini_native":
+                    tool_calls, assistant_text = await self._call_gemini_native(messages)
+                elif call_mode == "openai_native":
+                    tool_calls, assistant_text = await self._call_native(messages)
+                else:
+                    tool_calls, assistant_text = await self._call_fallback(messages)
             except Exception as exc:
                 logger.error("Agent LLM call failed: %s", exc)
                 yield AgentEvent(type="error", data=str(exc))
@@ -222,7 +246,7 @@ class AgentOrchestrator:
         """Parse tool calls from a plain-text response using <tool_call> tags."""
         clean_messages = self._clean_messages_for_api(messages)
 
-        text = await self.llm.chat_complete(clean_messages, max_tokens=1024, temperature=0.1)
+        text = await self.llm.chat_complete(clean_messages, max_tokens=4096, temperature=0.1)
 
         matches = _TOOL_CALL_RE.findall(text)
         calls: list[ToolCall] = []
@@ -241,6 +265,88 @@ class AgentOrchestrator:
         clean_text = _TOOL_CALL_RE.sub("", text).strip()
         return calls, clean_text
 
+    async def _call_gemini_native(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[ToolCall], str]:
+        """Use Google Gemini SDK for native function calling."""
+        from core.provider_config import get_remote_llm_config
+        from services.llm.gemini_native import GeminiNativeClient
+
+        config = get_remote_llm_config()
+        client = GeminiNativeClient(api_key=config.api_key, model=config.model)
+
+        # Pass raw messages — gemini_native handles role conversion itself
+        raw_calls, text = await client.call_with_tools(
+            messages, self.registry.specs,
+            max_tokens=4096, temperature=0.1,
+        )
+
+        calls = [
+            ToolCall(id=c["id"], tool_name=c["tool_name"], arguments=c["arguments"])
+            for c in raw_calls
+        ]
+        return calls, text
+
+    async def _call_native(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[ToolCall], str]:
+        """Use OpenAI-compatible native function calling (tools parameter)."""
+        import httpx
+        from core.provider_config import get_remote_llm_config
+        from services.llm.client import LlmClient
+
+        config = get_remote_llm_config()
+        url, headers = LlmClient._remote_url_and_headers(config)
+
+        # Convert tool specs to OpenAI function format (openai_tools() already wraps correctly)
+        tools = self.registry.openai_tools()
+
+        clean_messages = self._clean_messages_for_api(messages)
+
+        payload: dict[str, Any] = {
+            "messages": clean_messages,
+            "tools": tools,
+            "max_tokens": 4096,
+            "temperature": 0.1,
+        }
+        if "openai.azure.com" not in config.base_url:
+            payload["model"] = config.model
+
+        logger.info("Native function calling with %d tools", len(tools))
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            if resp.status_code != 200:
+                logger.error(f"Native call failed {resp.status_code}: {resp.text[:300]}")
+            resp.raise_for_status()
+            data = resp.json()
+
+        choice = data.get("choices", [{}])[0]
+        message = choice.get("message", {})
+        assistant_text = message.get("content", "") or ""
+        finish_reason = choice.get("finish_reason", "")
+
+        calls: list[ToolCall] = []
+        if finish_reason == "tool_calls" or message.get("tool_calls"):
+            for tc in message.get("tool_calls", []):
+                fn = tc.get("function", {})
+                try:
+                    args = json.loads(fn.get("arguments", "{}"))
+                except json.JSONDecodeError:
+                    args = {}
+                calls.append(ToolCall(
+                    id=tc.get("id", uuid.uuid4().hex[:8]),
+                    tool_name=fn.get("name", ""),
+                    arguments=args,
+                ))
+            logger.info("Native call returned %d tool calls: %s",
+                        len(calls), [c.tool_name for c in calls])
+        else:
+            logger.info("Native call returned text (no tool calls), finish=%s", finish_reason)
+
+        return calls, assistant_text
+
     async def _stream_final_answer(
         self,
         messages: list[dict[str, Any]],
@@ -249,7 +355,7 @@ class AgentOrchestrator:
         clean_messages = self._clean_messages_for_api(messages)
 
         async for chunk in self.llm.stream_chat_complete(
-            clean_messages, max_tokens=2048, temperature=0.3,
+            clean_messages, max_tokens=4096, temperature=0.3,
         ):
             yield chunk
 
