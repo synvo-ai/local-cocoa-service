@@ -143,6 +143,11 @@ class RerankClient:
         if not documents:
             return []
 
+        # Check if remote rerank is configured
+        from core.provider_config import is_rerank_remote, get_remote_rerank_config
+        if is_rerank_remote():
+            return await self._rerank_remote(query, documents, top_k)
+
         # Ensure rerank model is running
         await get_model_manager().ensure_model(ModelType.RERANK)
 
@@ -217,6 +222,34 @@ class RerankClient:
         logger.debug("Final ranked list: %s", ranked)
         return ranked
 
+    async def _rerank_remote(self, query: str, documents: Sequence[str], top_k: int = 5) -> list[tuple[int, float]]:
+        """Rerank using remote provider (DeepInfra / OpenAI-compatible)."""
+        from core.provider_config import get_remote_rerank_config
+        config = get_remote_rerank_config()
+        base_url = config.base_url.rstrip("/")
+        model = config.model
+
+        # DeepInfra inference endpoint: POST /v1/inference/{model}
+        if "deepinfra" in base_url:
+            url = f"https://api.deepinfra.com/v1/inference/{model}"
+        elif base_url.endswith(model):
+            url = base_url
+        else:
+            url = f"{base_url}/{model}" if model else base_url
+
+        headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+        payload = {"queries": [query], "documents": list(documents)}
+
+        logger.info("Remote rerank: %s (%d docs)", model, len(documents))
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+
+        scores = data.get("scores", [])
+        indexed = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+        return [(idx, score) for idx, score in indexed[:top_k]]
+
 
 class LlmClient:
     timeout: float = 120.0
@@ -226,6 +259,9 @@ class LlmClient:
         Ensure LLM model is running and ready.
         Returns True if model started successfully, False otherwise.
         """
+        from core.provider_config import is_llm_remote
+        if is_llm_remote():
+            return True  # Remote LLM assumed available
         try:
             await get_model_manager().ensure_model(ModelType.VISION)
             return True
@@ -245,6 +281,10 @@ class LlmClient:
         presence_penalty: float | None = None,
         repeat_last_n: int | None = None,
     ) -> str:
+        from core.provider_config import is_llm_remote
+        if is_llm_remote():
+            return await self._complete_remote(prompt, system=system, max_tokens=max_tokens, temperature=temperature)
+
         # Ensure LLM/Vision model is running
         await get_model_manager().ensure_model(ModelType.VISION)
 
@@ -356,7 +396,52 @@ class LlmClient:
         ratio = settings.llm_chars_per_token
         return max(math.ceil(len(text) / ratio), 1)
 
+    @staticmethod
+    def _remote_url_and_headers(config) -> tuple[str, dict[str, str]]:
+        """Build URL and auth headers for Azure / OpenAI / Gemini."""
+        base_url = config.base_url.rstrip("/")
+        is_azure = "openai.azure.com" in base_url
+        if is_azure:
+            url = f"{base_url}/chat/completions?api-version=2025-01-01-preview"
+            headers = {"api-key": config.api_key, "Content-Type": "application/json"}
+        else:
+            url = f"{base_url}/chat/completions"
+            headers = {"Authorization": f"Bearer {config.api_key}", "Content-Type": "application/json"}
+        return url, headers
+
+    async def _complete_remote(self, prompt: str, *, system: str | None = None,
+                               max_tokens: int = 512, temperature: float | None = None) -> str:
+        """Complete using remote LLM provider (Azure / OpenAI / Gemini)."""
+        from core.provider_config import get_remote_llm_config
+        config = get_remote_llm_config()
+        url, headers = self._remote_url_and_headers(config)
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        payload: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens}
+        if "openai.azure.com" not in config.base_url:
+            payload["model"] = config.model
+        if temperature is not None:
+            payload["temperature"] = temperature
+
+        logger.info(f"Remote LLM: {config.model} ({config.base_url})")
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        choices = data.get("choices", [])
+        if choices:
+            return choices[0].get("message", {}).get("content", "")
+        return ""
+
     async def chat(self, messages: list[dict[str, Any]], *, stream: bool = False) -> dict[str, Any]:
+        from core.provider_config import is_llm_remote
+        if is_llm_remote():
+            return await self._chat_remote(messages, stream=stream)
+
         # Ensure LLM/Vision model is running
         await get_model_manager().ensure_model(ModelType.VISION)
 
@@ -365,6 +450,19 @@ class LlmClient:
             response = await client.post(f"{settings.endpoints.llm_url}/chat", json=payload)
             response.raise_for_status()
             return response.json()
+
+    async def _chat_remote(self, messages: list[dict[str, Any]], *, stream: bool = False) -> dict[str, Any]:
+        """Chat using remote LLM provider (Azure / OpenAI / Gemini)."""
+        from core.provider_config import get_remote_llm_config
+        config = get_remote_llm_config()
+        url, headers = self._remote_url_and_headers(config)
+        payload: dict[str, Any] = {"messages": messages, "stream": False}
+        if "openai.azure.com" not in config.base_url:
+            payload["model"] = config.model
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.post(url, headers=headers, json=payload)
+            resp.raise_for_status()
+            return resp.json()
 
     async def chat_complete(
         self,
@@ -378,6 +476,27 @@ class LlmClient:
         repeat_last_n: int | None = None,
     ) -> str:
         """Use chat completion API for better VLM responses."""
+        from core.provider_config import is_llm_remote
+        if is_llm_remote():
+            from core.provider_config import get_remote_llm_config
+            config = get_remote_llm_config()
+            url, headers = self._remote_url_and_headers(config)
+            payload: dict[str, Any] = {"messages": messages, "max_tokens": max_tokens, "stream": False}
+            if "openai.azure.com" not in config.base_url:
+                payload["model"] = config.model
+            if temperature is not None:
+                payload["temperature"] = temperature
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.post(url, headers=headers, json=payload)
+                if resp.status_code != 200:
+                    logger.error(f"Remote chat_complete {resp.status_code}: {resp.text[:500]}")
+                resp.raise_for_status()
+                data = resp.json()
+            choices = data.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "")
+            return ""
+
         # Ensure LLM/Vision model is running
         await get_model_manager().ensure_model(ModelType.VISION)
 
