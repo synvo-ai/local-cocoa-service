@@ -132,7 +132,7 @@ SEND_EMAIL = ToolSpec(
         ToolParameter(name="account_id", type="string", description="The email account ID to send from"),
         ToolParameter(name="to", type="string", description="Recipient email address(es), comma-separated if multiple"),
         ToolParameter(name="subject", type="string", description="Email subject line"),
-        ToolParameter(name="body", type="string", description="Email body text"),
+        ToolParameter(name="body", type="string", description="Email body content. Use markdown formatting for structure: **bold**, *italic*, headings (#, ##), bullet lists (- item), numbered lists (1. item), etc. The email will be rendered as styled HTML."),
     ],
     side_effect=True,
 )

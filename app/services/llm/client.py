@@ -14,6 +14,7 @@ from PIL import Image
 
 from core.config import settings
 from core.model_manager import get_model_manager, ModelType
+from core.provider_config import get_provider_settings, is_llm_remote
 
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,31 @@ class RerankClient:
 class LlmClient:
     timeout: float = 120.0
 
+    def _get_request_params(self, endpoint_suffix: str = "/v1/chat/completions") -> tuple[list[str], dict[str, Any], str, str]:
+        if is_llm_remote():
+            ps = get_provider_settings()
+            remote = ps.remote_llm
+            base = remote.base_url.rstrip("/")
+            headers = {"Content-Type": "application/json"}
+            hint = remote.provider_hint or "openai"
+            if remote.api_key:
+                if hint == "anthropic":
+                    headers["x-api-key"] = remote.api_key
+                    headers["anthropic-version"] = "2023-06-01"
+                else:
+                    headers["Authorization"] = f"Bearer {remote.api_key}"
+            
+            if hint == "anthropic":
+                return [f"{base}/v1/messages"], {"headers": headers}, hint, remote.model
+            else:
+                return [f"{base}{endpoint_suffix}"], {"headers": headers}, hint, remote.model
+        else:
+            base = settings.endpoints.llm_url.rstrip("/")
+            endpoints = [f"{base}{endpoint_suffix}"]
+            if endpoint_suffix == "/v1/chat/completions":
+                endpoints.extend([f"{base}/chat/completions", f"{base}/chat"])
+            return endpoints, {}, "local", ""
+
     async def health_check(self) -> bool:
         """
         Ensure LLM model is running and ready.
@@ -397,25 +423,39 @@ class LlmClient:
         if repeat_last_n is not None:
             payload["repeat_last_n"] = repeat_last_n
 
-        base = settings.endpoints.llm_url.rstrip("/")
-        endpoints: list[str] = [
-            f"{base}/v1/chat/completions",
-            f"{base}/chat/completions",
-            f"{base}/chat",
-        ]
+        endpoints, kwargs, hint, model_id = self._get_request_params("/v1/chat/completions")
+        if model_id:
+            payload["model"] = model_id
+            
+        # Strip llama.cpp-only params for all remote providers
+        if hint != "local":
+            for _k in ("repeat_penalty", "repeat_last_n"):
+                payload.pop(_k, None)
+        if hint == "anthropic":
+            for _k in ("frequency_penalty", "presence_penalty"):
+                payload.pop(_k, None)
+        # OpenAI gpt-5+ requires max_completion_tokens instead of max_tokens
+        if hint == "openai" and "max_tokens" in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
 
         errors: list[str] = []
-        logger.info(f"🔧 Chat Request: messages={len(messages)}, max_tokens={max_tokens}")
-        logger.debug(f"🔧 Chat Request payload: {payload}")
+        logger.info(f"🔧 Chat Request [%s]: messages=%d, max_tokens=%d", hint, len(messages), max_tokens)
+        logger.debug(f"🔧 Chat Request payload keys: {list(payload.keys())}")
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
                 for attempt in range(_503_MAX_RETRIES + 1):
                     try:
                         logger.info(f"📡 Calling Chat endpoint: {endpoint}")
-                        response = await client.post(endpoint, json=payload)
+                        response = await client.post(endpoint, json=payload, **kwargs)
                         response.raise_for_status()
                         data = response.json()
                         logger.info(f"📥 Chat Response data keys: {list(data.keys())}")
+                        
+                        if hint == "anthropic":
+                            content_blocks = data.get("content", [])
+                            if content_blocks and isinstance(content_blocks, list):
+                                return str(content_blocks[0].get("text", ""))
+                            return ""
 
                         # OpenAI-style response
                         if "choices" in data and len(data["choices"]) > 0:
@@ -435,8 +475,13 @@ class LlmClient:
                         if delay is not None:
                             await asyncio.sleep(delay)
                             continue
-                        logger.warning(f"❌ Chat endpoint {endpoint} failed: {exc}")
-                        errors.append(f"{endpoint}: {exc}")
+                        error_body = ""
+                        try:
+                            error_body = exc.response.text[:500]
+                        except Exception:
+                            pass
+                        logger.warning("❌ Chat endpoint %s failed: %s | Body: %s", endpoint, exc, error_body)
+                        errors.append(f"{endpoint}: {exc} | {error_body}")
                         break
                     except (httpx.HTTPError, ValueError) as exc:
                         logger.warning(f"❌ Chat endpoint {endpoint} failed: {exc}")
@@ -455,46 +500,56 @@ class LlmClient:
         *,
         max_tokens: int = 1024,
         temperature: float | None = None,
-    ) -> dict[str, Any]:
+    ) -> Any:
         """Non-streaming chat completion with OpenAI-style tool/function calling.
 
         Returns the full ``choices[0].message`` dict which may contain
         ``tool_calls`` if the model decides to invoke a tool, or plain
         ``content`` for a text response.
+        For Anthropic, it returns the `content` array if tool_use blocks are present.
         """
         await get_model_manager().ensure_model(ModelType.VISION)
 
+        endpoints, kwargs, hint, model_id = self._get_request_params("/v1/chat/completions")
+
         payload: dict[str, Any] = {
             "messages": messages,
-            "max_tokens": min(max_tokens, settings.llm_context_tokens),
             "stream": False,
-            "tools": tools,
         }
+        
+        payload["tools"] = tools
+        if model_id:
+            payload["model"] = model_id
+        # Use the correct token-limit key per provider
+        if hint == "openai":
+            payload["max_completion_tokens"] = min(max_tokens, settings.llm_context_tokens)
+        else:
+            payload["max_tokens"] = min(max_tokens, settings.llm_context_tokens)
+            
         if temperature is not None:
             payload["temperature"] = temperature
 
-        base = settings.endpoints.llm_url.rstrip("/")
-        endpoints: list[str] = [
-            f"{base}/v1/chat/completions",
-            f"{base}/chat/completions",
-        ]
-
         errors: list[str] = []
         logger.info(
-            "🔧 Chat+Tools Request: messages=%d, tools=%d, max_tokens=%d",
-            len(messages), len(tools), max_tokens,
+            "🔧 Chat+Tools Request [%s]: messages=%d, tools=%d, max_tokens=%d",
+            hint, len(messages), len(tools), max_tokens,
         )
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
                 for attempt in range(_503_MAX_RETRIES + 1):
                     try:
-                        response = await client.post(endpoint, json=payload)
+                        response = await client.post(endpoint, json=payload, **kwargs)
                         response.raise_for_status()
                         data = response.json()
 
+                        if hint == "anthropic":
+                            # Return the content structure natively
+                            return data.get("content", [])
+
                         if "choices" in data and len(data["choices"]) > 0:
                             message = data["choices"][0].get("message", {})
+                            logger.debug("📥 Chat+Tools response message keys: %s", list(message.keys()))
                             return message
 
                         if "content" in data:
@@ -506,9 +561,16 @@ class LlmClient:
                         if delay is not None:
                             await asyncio.sleep(delay)
                             continue
-                        errors.append(f"{endpoint}: {exc}")
+                        error_body = ""
+                        try:
+                            error_body = exc.response.text[:500]
+                        except Exception:
+                            pass
+                        logger.warning("❌ Chat+Tools endpoint %s failed: %s | Body: %s", endpoint, exc, error_body)
+                        errors.append(f"{endpoint}: {exc} | {error_body}")
                         break
                     except (httpx.HTTPError, ValueError) as exc:
+                        logger.warning("❌ Chat+Tools endpoint %s failed: %s", endpoint, exc)
                         errors.append(f"{endpoint}: {exc}")
                         break
                 else:
@@ -904,24 +966,56 @@ class LlmClient:
         if presence_penalty is not None:
             payload["presence_penalty"] = presence_penalty
 
-        base = settings.endpoints.llm_url.rstrip("/")
-        endpoints: list[str] = [
-            f"{base}/v1/chat/completions",
-            f"{base}/chat/completions",
-        ]
+        endpoints, kwargs, hint, model_id = self._get_request_params("/v1/chat/completions")
+        if model_id:
+            payload["model"] = model_id
+            
+        # Strip llama.cpp-only params for all remote providers
+        if hint != "local":
+            for _k in ("repeat_penalty", "repeat_last_n"):
+                payload.pop(_k, None)
+        if hint == "anthropic":
+            for _k in ("frequency_penalty", "presence_penalty"):
+                payload.pop(_k, None)
+        # OpenAI gpt-5+ requires max_completion_tokens instead of max_tokens
+        if hint == "openai" and "max_tokens" in payload:
+            payload["max_completion_tokens"] = payload.pop("max_tokens")
 
-        logger.info(f"🔧 Stream Chat Request: messages={len(messages)}, max_tokens={max_tokens}")
+        logger.info("🔧 Stream Chat Request [%s]: messages=%d, max_tokens=%d, payload_keys=%s", hint, len(messages), max_tokens, list(payload.keys()))
 
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             for endpoint in endpoints:
                 for attempt in range(_503_MAX_RETRIES + 1):
                     try:
                         logger.info(f"📡 Streaming from Chat endpoint: {endpoint} (attempt {attempt + 1}/{_503_MAX_RETRIES + 1})")
-                        async with client.stream("POST", endpoint, json=payload) as response:
-                            response.raise_for_status()
+                        async with client.stream("POST", endpoint, json=payload, **kwargs) as response:
+                            # Read error body BEFORE raise_for_status so we get the API error message
+                            if response.status_code >= 400:
+                                error_body = (await response.aread()).decode("utf-8", errors="replace")
+                                logger.warning("❌ Stream chat API %d for %s: %s", response.status_code, endpoint, error_body[:500])
+                                response.raise_for_status()
                             async for line in response.aiter_lines():
                                 if not line.strip():
                                     continue
+                                
+                                # Anthropic format is slightly different
+                                if hint == "anthropic":
+                                    if line.startswith("event:"):
+                                        continue
+                                    if line.startswith("data: "):
+                                        data_str = line[6:]
+                                        if data_str.strip() == "[DONE]":
+                                            continue
+                                        try:
+                                            data = json.loads(data_str)
+                                            if data.get("type") == "content_block_delta":
+                                                delta = data.get("delta", {})
+                                                if delta.get("type") == "text_delta":
+                                                    yield delta.get("text", "")
+                                        except:
+                                            pass
+                                    continue
+
                                 if line.startswith("data: "):
                                     data_str = line[6:]
                                     if data_str.strip() == "[DONE]":

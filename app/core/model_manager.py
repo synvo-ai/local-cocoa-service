@@ -320,7 +320,8 @@ class ModelManager:
                 "--port", str(model.port),
                 "-c", ctx,
                 "--threads", threads,
-                "-ngl", ngl
+                "-ngl", ngl,
+                "--jinja",
             ]
             cache_ram = os.getenv("LLAMA_PROMPT_CACHE", "0")
             if cache_ram != "0" and cache_ram != "false":

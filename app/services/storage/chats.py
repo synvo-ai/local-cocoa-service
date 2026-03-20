@@ -103,7 +103,7 @@ class ChatMixin:
                     is_multi_path, thinking_steps, needs_user_decision, resume_token,
                     decision_message, tool_calls
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     message.id,

@@ -251,7 +251,7 @@ async def on_shutdown():
 
     logger.info("Shutdown complete")
 
-    global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task
+    global _poll_task, _startup_refresh_task, _summary_task, _staged_scheduler_task, _throttle_task
     if _poll_task:
         _poll_task.cancel()
         try:

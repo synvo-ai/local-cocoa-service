@@ -282,6 +282,7 @@ class OutlookService:
         to_recipients: list[str],
         subject: str,
         body: str,
+        body_is_html: bool = False,
         username: str | None = None,
     ) -> None:
         """Send an email via Microsoft Graph sendMail API."""
@@ -319,9 +320,10 @@ class OutlookService:
                 if addr.strip()
             ]
 
+            content_type = BodyType.Html if body_is_html else BodyType.Text
             message = Message(
                 subject=subject,
-                body=ItemBody(content_type=BodyType.Text, content=body),
+                body=ItemBody(content_type=content_type, content=body),
                 to_recipients=recipients,
             )
 

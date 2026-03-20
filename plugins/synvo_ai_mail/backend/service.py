@@ -444,6 +444,8 @@ class EmailService(EmailMixin):
 
     def _send_smtp(self, account: EmailAccount, request: EmailSendRequest) -> dict[str, str]:
         """Send via SMTP using the account's stored credentials."""
+        from plugins.synvo_ai_mail.backend.email_renderer import render_email_html
+
         smtp_host, smtp_port = self._resolve_smtp(account)
         password = self._decode_secret(account.secret)
 
@@ -451,7 +453,11 @@ class EmailService(EmailMixin):
         msg["From"] = account.username
         msg["To"] = ", ".join(request.to)
         msg["Subject"] = request.subject
+        # Plain-text fallback
         msg.set_content(request.body)
+        # Rich HTML alternative
+        html_body = render_email_html(request.body)
+        msg.add_alternative(html_body, subtype="html")
 
         try:
             if smtp_port == 465:
@@ -476,12 +482,16 @@ class EmailService(EmailMixin):
         outlook = OutlookService()
         client_id = account.client_id or OUTLOOK_DEFAULT_CLIENT_ID
         tenant_id = account.tenant_id or OUTLOOK_DEFAULT_TENANT_ID
+        from plugins.synvo_ai_mail.backend.email_renderer import render_email_html
+
+        html_body = render_email_html(request.body)
         await outlook.send_message(
             client_id=client_id,
             tenant_id=tenant_id,
             to_recipients=request.to,
             subject=request.subject,
-            body=request.body,
+            body=html_body,
+            body_is_html=True,
             username=account.username,
         )
         return {"status": "sent", "from": account.username, "to": request.to}

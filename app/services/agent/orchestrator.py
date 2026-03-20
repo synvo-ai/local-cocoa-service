@@ -16,9 +16,10 @@ import uuid
 from typing import Any, AsyncGenerator
 
 from services.llm.client import LlmClient
+from core.provider_config import get_provider_settings, is_llm_remote
 
 from .models import AgentEvent, AgentExecutionState, AgentRequest, ToolCall, ToolResult
-from .prompts import build_system_prompt_with_fallback
+from .prompts import build_system_prompt, build_system_prompt_with_fallback
 from .registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
@@ -67,10 +68,26 @@ class AgentOrchestrator:
         self.registry = registry
         self.approval_mode = approval_mode
 
+    def _is_native_mode(self) -> bool:
+        """Return True when the active provider supports native tool calling.
+
+        Native mode is used for:
+        - Remote OpenAI / Anthropic / vLLM providers
+        - Local llama-server (started with --jinja, supports OpenAI-style tools)
+        """
+        if is_llm_remote():
+            hint = get_provider_settings().remote_llm.provider_hint or "openai"
+            return hint in ("openai", "anthropic", "vllm")
+        # Local llama-server with --jinja supports native OpenAI-style tool calling
+        return True
+
     def create_execution_state(self, request: AgentRequest) -> AgentExecutionState:
         """Create resumable execution state for a new request."""
         messages: list[dict[str, Any]] = []
-        system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
+        if self._is_native_mode():
+            system_prompt = build_system_prompt(self.registry.specs, approval_mode=self.approval_mode)
+        else:
+            system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
         messages.append({"role": "system", "content": system_prompt})
 
         for msg in request.conversation_history[-10:]:
@@ -108,20 +125,61 @@ class AgentOrchestrator:
         def _elapsed() -> int:
             return int((time.perf_counter() - t0) * 1000)
 
+        native_mode = self._is_native_mode()
+        tool_calling_mode = "native" if native_mode else "fallback"
+
+        # Build provider info for the UI
+        if is_llm_remote():
+            ps = get_provider_settings()
+            provider_type = "cloud"
+            model_label = ps.remote_llm.model or ps.remote_llm.provider_hint or "remote"
+        else:
+            from core.config import settings as _settings
+            provider_type = "local"
+            # Derive a short label from the VLM model filename
+            vlm_file = _settings.paths.vlm_model
+            model_label = vlm_file.rsplit("/", 1)[-1].rsplit(".", 1)[0] if vlm_file else "local model"
+
         if emit_start:
             yield _thinking_event("Analyzing your request...", step_type="analyze", elapsed_ms=_elapsed())
 
-        for iteration in range(state.next_iteration, state.max_iterations):
-            logger.info("Agent iteration %d/%d", iteration + 1, state.max_iterations)
+        # Tell the UI which tool-calling mode and provider are active
+        yield AgentEvent(type="status", data={
+            "tool_calling_mode": tool_calling_mode,
+            "provider_type": provider_type,
+            "model_label": model_label,
+        })
 
-            # -- Call LLM (fallback mode) ---------------------------------
+        for iteration in range(state.next_iteration, state.max_iterations):
+            logger.info("Agent iteration %d/%d (mode=%s)", iteration + 1, state.max_iterations, tool_calling_mode)
+
+            # -- Call LLM (native with fallback) --------------------------
             try:
-                tool_calls, assistant_text = await self._call_fallback(messages)
+                if native_mode:
+                    if is_llm_remote():
+                        ps = get_provider_settings()
+                        provider_hint = ps.remote_llm.provider_hint or "openai"
+                    else:
+                        provider_hint = "local"
+                    tool_calls, assistant_text = await self._call_native(messages, provider_hint)
+                else:
+                    tool_calls, assistant_text = await self._call_fallback(messages)
             except Exception as exc:
-                logger.error("Agent LLM call failed: %s", exc)
-                yield AgentEvent(type="error", data=str(exc))
-                yield AgentEvent(type="done")
-                return
+                if native_mode:
+                    logger.warning("Native tool call failed (%s), falling back to XML mode", exc)
+                    try:
+                        tool_calls, assistant_text = await self._call_fallback(messages)
+                        tool_calling_mode = "fallback"
+                    except Exception as fallback_exc:
+                        logger.error("Fallback also failed: %s", fallback_exc)
+                        yield AgentEvent(type="error", data=str(fallback_exc))
+                        yield AgentEvent(type="done")
+                        return
+                else:
+                    logger.error("Agent LLM call failed: %s", exc)
+                    yield AgentEvent(type="error", data=str(exc))
+                    yield AgentEvent(type="done")
+                    return
 
             # -- No tool calls -> final answer ----------------------------
             if not tool_calls:
@@ -129,15 +187,21 @@ class AgentOrchestrator:
                     logger.info("Retrying agent turn because model narrated send_email without a tool call")
                     if assistant_text:
                         messages.append({"role": "assistant", "content": assistant_text})
-                    messages.append({
-                        "role": "user",
-                        "content": (
+                    if native_mode:
+                        nudge = (
+                            "You indicated that you are sending an email. "
+                            "Do not describe the action in prose. "
+                            "If you have enough information, call the send_email tool now. "
+                            "If information is missing, reply briefly with exactly what is missing."
+                        )
+                    else:
+                        nudge = (
                             "You indicated that you are sending an email. "
                             "Do not describe the action in prose. "
                             "If you have enough information, respond with ONLY a <tool_call> block for send_email. "
                             "If information is missing, reply briefly with exactly what is missing."
-                        ),
-                    })
+                        )
+                    messages.append({"role": "user", "content": nudge})
                     continue
 
                 yield AgentEvent(type="status", data="answering")
@@ -215,6 +279,129 @@ class AgentOrchestrator:
 
     # -- LLM call strategies ----------------------------------------------
 
+
+    async def _call_native(
+        self,
+        messages: list[dict[str, Any]],
+        provider_hint: str
+    ) -> tuple[list[ToolCall], str]:
+        """Parse tool calls using native tool configuration schemas."""
+        tools = []
+        if provider_hint == "anthropic":
+            for spec in self.registry.specs:
+                openai_fn = spec.to_openai_function()
+                tools.append({
+                    "name": openai_fn["function"]["name"],
+                    "description": openai_fn["function"]["description"][:1024],
+                    "input_schema": openai_fn["function"]["parameters"],
+                })
+        else:
+            # OpenAI, vLLM, and local llama-server all use OpenAI-style tool schemas
+            for spec in self.registry.specs:
+                tools.append(spec.to_openai_function())
+
+        formatted_messages = self._format_messages_for_native(messages, provider_hint)
+
+        response = await self.llm.chat_complete_with_tools(
+            formatted_messages, tools=tools, max_tokens=1024, temperature=0.1
+        )
+
+        calls: list[ToolCall] = []
+        assistant_text = ""
+
+        if provider_hint == "anthropic" and isinstance(response, list):
+            for block in response:
+                if block.get("type") == "text":
+                    assistant_text += block.get("text", "")
+                elif block.get("type") == "tool_use":
+                    calls.append(ToolCall(
+                        id=block.get("id", uuid.uuid4().hex[:8]),
+                        tool_name=block.get("name", ""),
+                        arguments=block.get("input", {})
+                    ))
+        elif isinstance(response, dict):
+            assistant_text = response.get("content") or ""
+            for raw_tc in response.get("tool_calls", []):
+                # OpenAI format: {id, type, function: {name, arguments}}
+                # llama-server format: {name, arguments} (no wrapper)
+                fn = raw_tc.get("function")
+                if fn:
+                    # OpenAI / vLLM style
+                    tc_name = fn.get("name", "")
+                    raw_args = fn.get("arguments", "{}")
+                    tc_id = raw_tc.get("id", uuid.uuid4().hex[:8])
+                else:
+                    # llama-server style (flat name + arguments)
+                    tc_name = raw_tc.get("name", "")
+                    raw_args = raw_tc.get("arguments", "{}")
+                    tc_id = raw_tc.get("id", uuid.uuid4().hex[:8])
+                try:
+                    args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    args = {}
+                calls.append(ToolCall(
+                    id=tc_id,
+                    tool_name=tc_name,
+                    arguments=args
+                ))
+
+        return calls, assistant_text
+
+    @staticmethod
+    def _format_messages_for_native(messages: list[dict[str, Any]], provider_hint: str) -> list[dict[str, Any]]:
+        clean: list[dict[str, Any]] = []
+        sys_texts = []
+        for msg in messages:
+            role = msg.get("role", "user")
+            content = msg.get("content")
+            
+            if role == "system":
+                sys_texts.append(str(content))
+                continue
+
+            if role == "tool":
+                tool_id = msg.get("tool_call_id", "")
+                if provider_hint == "anthropic":
+                    clean.append({
+                        "role": "user",
+                        "content": [{
+                            "type": "tool_result",
+                            "tool_use_id": tool_id,
+                            "content": str(content)
+                        }]
+                    })
+                else: 
+                    clean.append({
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": str(content)
+                    })
+            else:
+                if "tool_calls" in msg and provider_hint == "anthropic":
+                    c_blocks = []
+                    if content:
+                        c_blocks.append({"type": "text", "text": str(content)})
+                    for tc in msg["tool_calls"]:
+                        try:
+                            # Sometimes arguments is string from stringify
+                            args = json.loads(tc["function"]["arguments"])
+                        except (json.JSONDecodeError, TypeError, KeyError):
+                            args = tc.get("function", {}).get("arguments", {})
+                        c_blocks.append({
+                            "type": "tool_use",
+                            "id": tc.get("id"),
+                            "name": tc["function"]["name"],
+                            "input": args
+                        })
+                    clean.append({"role": "assistant", "content": c_blocks})
+                else:
+                    clean.append({"role": role, "content": msg.get("content", ""), **({"tool_calls": msg["tool_calls"]} if "tool_calls" in msg else {})})
+
+        if sys_texts:
+            clean.insert(0, {"role": "system", "content": "\n\n".join(sys_texts)})
+            
+        return clean
+
     async def _call_fallback(
         self,
         messages: list[dict[str, Any]],
@@ -246,7 +433,15 @@ class AgentOrchestrator:
         messages: list[dict[str, Any]],
     ) -> AsyncGenerator[str, None]:
         """Stream the final answer using the chat completion streaming API."""
-        clean_messages = self._clean_messages_for_api(messages)
+        if self._is_native_mode():
+            if is_llm_remote():
+                ps = get_provider_settings()
+                hint = ps.remote_llm.provider_hint or "openai"
+            else:
+                hint = "local"
+            clean_messages = self._format_messages_for_native(messages, hint)
+        else:
+            clean_messages = self._clean_messages_for_api(messages)
 
         async for chunk in self.llm.stream_chat_complete(
             clean_messages, max_tokens=2048, temperature=0.3,
