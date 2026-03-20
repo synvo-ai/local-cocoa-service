@@ -81,10 +81,27 @@ class AgentOrchestrator:
         # Local llama-server with --jinja supports native OpenAI-style tool calling
         return True
 
+    def _is_gemini_native_mode(self) -> bool:
+        """Return True when Gemini native function calling should be used."""
+        if not is_llm_remote():
+            return False
+        remote = get_provider_settings().remote_llm
+        base_url = remote.base_url or ""
+        hint = remote.provider_hint or ""
+        return hint == "gemini" or "generativelanguage.googleapis.com" in base_url
+
+    def _provider_hint(self) -> str:
+        if is_llm_remote():
+            return get_provider_settings().remote_llm.provider_hint or "openai"
+        return "local"
+
+    def _uses_native_prompt(self) -> bool:
+        return self._is_native_mode() or self._is_gemini_native_mode()
+
     def create_execution_state(self, request: AgentRequest) -> AgentExecutionState:
         """Create resumable execution state for a new request."""
         messages: list[dict[str, Any]] = []
-        if self._is_native_mode():
+        if self._uses_native_prompt():
             system_prompt = build_system_prompt(self.registry.specs, approval_mode=self.approval_mode)
         else:
             system_prompt = build_system_prompt_with_fallback(self.registry.specs, approval_mode=self.approval_mode)
@@ -126,7 +143,8 @@ class AgentOrchestrator:
             return int((time.perf_counter() - t0) * 1000)
 
         native_mode = self._is_native_mode()
-        tool_calling_mode = "native" if native_mode else "fallback"
+        gemini_native_mode = self._is_gemini_native_mode()
+        tool_calling_mode = "native" if (native_mode or gemini_native_mode) else "fallback"
 
         # Build provider info for the UI
         if is_llm_remote():
@@ -153,19 +171,17 @@ class AgentOrchestrator:
         for iteration in range(state.next_iteration, state.max_iterations):
             logger.info("Agent iteration %d/%d (mode=%s)", iteration + 1, state.max_iterations, tool_calling_mode)
 
-            # -- Call LLM (native with fallback) --------------------------
+            # -- Call LLM (Gemini native / general native / prompt fallback) --
             try:
-                if native_mode:
-                    if is_llm_remote():
-                        ps = get_provider_settings()
-                        provider_hint = ps.remote_llm.provider_hint or "openai"
-                    else:
-                        provider_hint = "local"
+                if gemini_native_mode:
+                    tool_calls, assistant_text = await self._call_gemini_native(messages)
+                elif native_mode:
+                    provider_hint = self._provider_hint()
                     tool_calls, assistant_text = await self._call_native(messages, provider_hint)
                 else:
                     tool_calls, assistant_text = await self._call_fallback(messages)
             except Exception as exc:
-                if native_mode:
+                if native_mode or gemini_native_mode:
                     logger.warning("Native tool call failed (%s), falling back to XML mode", exc)
                     try:
                         tool_calls, assistant_text = await self._call_fallback(messages)
@@ -409,7 +425,7 @@ class AgentOrchestrator:
         """Parse tool calls from a plain-text response using <tool_call> tags."""
         clean_messages = self._clean_messages_for_api(messages)
 
-        text = await self.llm.chat_complete(clean_messages, max_tokens=1024, temperature=0.1)
+        text = await self.llm.chat_complete(clean_messages, max_tokens=4096, temperature=0.1)
 
         matches = _TOOL_CALL_RE.findall(text)
         calls: list[ToolCall] = []
@@ -428,6 +444,29 @@ class AgentOrchestrator:
         clean_text = _TOOL_CALL_RE.sub("", text).strip()
         return calls, clean_text
 
+    async def _call_gemini_native(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[list[ToolCall], str]:
+        """Use Google Gemini SDK for native function calling."""
+        from core.provider_config import get_remote_llm_config
+        from services.llm.gemini_native import GeminiNativeClient
+
+        config = get_remote_llm_config()
+        client = GeminiNativeClient(api_key=config.api_key, model=config.model)
+
+        # Pass raw messages — gemini_native handles role conversion itself
+        raw_calls, text = await client.call_with_tools(
+            messages, self.registry.specs,
+            max_tokens=4096, temperature=0.1,
+        )
+
+        calls = [
+            ToolCall(id=c["id"], tool_name=c["tool_name"], arguments=c["arguments"])
+            for c in raw_calls
+        ]
+        return calls, text
+
     async def _stream_final_answer(
         self,
         messages: list[dict[str, Any]],
@@ -444,7 +483,7 @@ class AgentOrchestrator:
             clean_messages = self._clean_messages_for_api(messages)
 
         async for chunk in self.llm.stream_chat_complete(
-            clean_messages, max_tokens=2048, temperature=0.3,
+            clean_messages, max_tokens=4096, temperature=0.3,
         ):
             yield chunk
 

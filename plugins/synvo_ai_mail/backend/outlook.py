@@ -11,10 +11,12 @@ from typing import Any
 
 import msal
 from azure.core.credentials import AccessToken
-from msal_extensions import (
-    PersistedTokenCache,
-    build_encrypted_persistence,
-)
+from msal_extensions import PersistedTokenCache
+try:
+    from msal_extensions import build_encrypted_persistence
+except Exception:
+    build_encrypted_persistence = None
+from msal_extensions import FilePersistence
 from msgraph import GraphServiceClient
 from msgraph.generated.users.item.mail_folders.item.messages.messages_request_builder import (
     MessagesRequestBuilder,
@@ -95,9 +97,14 @@ class OutlookService:
         """
         Initializes the persistent token cache.
         """
-        # Using build_encrypted_persistence is safer and cross-platform compatible
-        # It uses DPAPI on Windows, LibSecret on Linux, Keychain on Mac
-        persistence = build_encrypted_persistence(str(CACHE_FILE))
+        # Try encrypted persistence (DPAPI/LibSecret/Keychain), fallback to plain file
+        if build_encrypted_persistence is not None:
+            try:
+                persistence = build_encrypted_persistence(str(CACHE_FILE))
+            except Exception:
+                persistence = FilePersistence(str(CACHE_FILE))
+        else:
+            persistence = FilePersistence(str(CACHE_FILE))
         cache = PersistedTokenCache(persistence)
         return cache
 
