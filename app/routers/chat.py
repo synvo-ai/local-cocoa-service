@@ -76,7 +76,7 @@ async def add_message(session_id: str, payload: ChatMessageCreate):
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    now = dt.datetime.now(dt.timezone.utc)
+    now = payload.timestamp or dt.datetime.now(dt.timezone.utc)
     message = ChatMessage(
         id=str(uuid.uuid4()),
         session_id=session_id,

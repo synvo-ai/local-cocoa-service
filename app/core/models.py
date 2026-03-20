@@ -465,6 +465,7 @@ class ChatMessageCreate(BaseModel):
 
     role: Literal["user", "assistant", "system"]
     content: str
+    timestamp: Optional[dt.datetime] = None
     meta: Optional[str] = None
     references: Optional[list[SearchHit]] = None
     # Multi-path thinking steps
