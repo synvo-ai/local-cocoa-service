@@ -7,11 +7,11 @@ import sqlite3
 from pathlib import Path
 from typing import Optional
 
-from services.storage import StorageBase
+from services.storage import FileMixin, StorageBase
 from .models import NoteRecord
 
 
-class NoteMixin(StorageBase):
+class NoteMixin(StorageBase, FileMixin):
     """Mixin for handling notes."""
     plugin_id: str = ""
     def __init__(self, plugin_id: str, db_path: str = "") -> None:

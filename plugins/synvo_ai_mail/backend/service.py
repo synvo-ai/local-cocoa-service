@@ -142,12 +142,27 @@ class EmailService(EmailMixin):
         summaries: list[EmailAccountSummary] = []
         accounts = self.list_email_accounts()
         for account in accounts:
+            folder_path = self._account_spool_path(account.id)
+            summaries.append(self._to_summary(account, folder_path))
+        return summaries
+
+    def perform_maintenance(self, account_id: Optional[str] = None) -> None:
+        """
+        Perform maintenance tasks: prune missing messages and ensure folders exist.
+        If account_id is None, perform for all accounts.
+        """
+        accounts = [self.get_email_account(account_id)] if account_id else self.list_email_accounts()
+        
+        for account in accounts:
+            if not account:
+                continue
             removed = self.prune_missing_email_messages(account.id)
             if removed:
                 logger.info("Pruned %d orphaned email message records for %s", removed, account.label)
-            folder_path = self._ensure_account_folder(account)
-            summaries.append(self._to_summary(account, folder_path))
-        return summaries
+            self._ensure_account_folder(account)
+        
+        if not account_id:
+            logger.info("Universal email maintenance completed.")
 
     def add_account(self, payload: EmailAccountCreate) -> EmailAccountSummary:
         payload_label = payload.label.strip()
@@ -177,7 +192,8 @@ class EmailService(EmailMixin):
                 raise EmailServiceError("An account with the same host and username already exists.")
 
         self.upsert_email_account(account)
-        folder_path = self._ensure_account_folder(account)
+        self.perform_maintenance(account.id)
+        folder_path = self._account_spool_path(account.id)
         return self._to_summary(account, folder_path)
 
     def remove_account(self, account_id: str) -> None:
@@ -217,7 +233,8 @@ class EmailService(EmailMixin):
         if not account:
             raise EmailAccountNotFound("Email account not found.")
 
-        folder_path = self._ensure_account_folder(account)
+        self.perform_maintenance(account.id)
+        folder_path = self._account_spool_path(account.id)
 
         if account.protocol == "outlook":
             return await self._sync_outlook(account, request, folder_path)

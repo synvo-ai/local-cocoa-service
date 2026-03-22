@@ -94,12 +94,14 @@ async def remove_folder(folder_id: str) -> Response:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Folder not found.")
 
     # Cancel any ongoing indexing for this folder
+    logger.info(f"Removing folder: {folder_id} ({folder.path})")
     indexer.cancel_folder(folder_id)
 
     # Remove vectors
     await loop.run_in_executor(None, lambda: get_vector_store().delete_by_filter(folder_id=folder_id))
 
     await loop.run_in_executor(None, lambda: storage.remove_folder(folder_id))
+    logger.info(f"Successfully removed folder from storage: {folder_id}")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

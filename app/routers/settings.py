@@ -49,6 +49,7 @@ async def get_settings():
         "enable_memory_extraction": settings.enable_memory_extraction,
         "memory_extraction_stage": settings.memory_extraction_stage,
         "memory_chunk_size": settings.memory_chunk_size,
+        "supported_extensions": settings.supported_extensions,
     }
 
 
@@ -146,5 +147,6 @@ async def update_settings(update: SettingsUpdate):
             "active_reranker_model_id": settings.active_reranker_model_id,
             "active_audio_model_id": settings.active_audio_model_id,
             "llm_context_tokens": settings.llm_context_tokens,
+            "supported_extensions": settings.supported_extensions,
         }
     }

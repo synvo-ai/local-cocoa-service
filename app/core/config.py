@@ -168,6 +168,7 @@ class Settings(BaseSettings):
     db_name: str = Field(alias="LOCAL_RAG_DB_NAME")
     max_depth: int = Field(alias="LOCAL_RAG_MAX_DEPTH")
     follow_symlinks: bool = Field(alias="LOCAL_RAG_FOLLOW_SYMLINKS")
+    supported_extensions: list[str] | str = Field(alias="LOCAL_RAG_SUPPORTED_EXTENSIONS")
     reuse_embeddings: bool = Field(alias="LOCAL_RAG_REUSE_EMBEDDINGS")
     embed_batch_size: int = Field(ge=1, alias="LOCAL_RAG_EMBED_BATCH_SIZE")
     embed_batch_delay_ms: int = Field(ge=0, alias="LOCAL_RAG_EMBED_BATCH_DELAY_MS")
@@ -251,6 +252,15 @@ class Settings(BaseSettings):
 
     
     @model_validator(mode='after')
+    def parse_supported_extensions(self) -> 'Settings':
+        if isinstance(self.supported_extensions, str):
+            # If it's a string, it's likely a comma-separated list from env var
+            self.supported_extensions = [ext.strip().lower() for ext in self.supported_extensions.split(",") if ext.strip()]
+        elif isinstance(self.supported_extensions, list):
+            self.supported_extensions = [ext.strip().lower() for ext in self.supported_extensions if isinstance(ext, str)]
+        return self
+
+    @model_validator(mode='after')
     def resolve_all_placeholders(self) -> 'Settings':
         """
         Final pass to resolve any ${VAR} placeholders after all sources (env, .env, .env.mode) 
@@ -319,6 +329,7 @@ class Settings(BaseSettings):
             "memory_extraction_stage": self.memory_extraction_stage,
             "memory_chunk_size": self.memory_chunk_size,
             "llm_context_tokens": self.llm_context_tokens,
+            "supported_extensions": self.supported_extensions,
         }
         try:
             with open(self.settings_path, 'w') as f:

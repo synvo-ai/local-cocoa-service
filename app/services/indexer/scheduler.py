@@ -304,6 +304,12 @@ class TwoRoundScheduler:
                 for file_record in pending:
                     if self._cancel_requested:
                         return False
+
+                    # Skip files from cancelled folders (to avoid race conditions during removal)
+                    if file_record.folder_id in self.state.cancelled_folders:
+                        logger.info("Skipping file from cancelled folder: %s", file_record.folder_id)
+                        continue
+
                     await self.state.pause_event.wait()
 
                     self._set_active(file_record, "fast_text")
@@ -347,12 +353,22 @@ class TwoRoundScheduler:
                     self._set_active(ready[0], "fast_embed")
 
                     # Use batch processing for better GPU utilization
-                    file_ids = [f.id for f in ready]
+                    # Filter out any files whose folders were cancelled mid-batch
+                    ready_batch = [
+                        f for f in ready 
+                        if f.folder_id not in self.state.cancelled_folders
+                    ]
+                    
+                    if not ready_batch:
+                        self.state.reset_active_state()
+                        return True # Try next priority
+
+                    file_ids = [f.id for f in ready_batch]
                     success_count = await self.fast_embed.process_batch(file_ids)
                     self.state.progress.processed += success_count
 
                     # Remove remaining batch files from pending
-                    for f in ready[1:]:
+                    for f in ready_batch[1:]:
                         p = Path(f.path) if isinstance(f.path, str) else f.path
                         fid = f.folder_id
                         if fid in self.state.pending_paths:
@@ -415,6 +431,15 @@ class TwoRoundScheduler:
 
                 if ready:
                     file_record = ready[0]
+                    
+                    # Skip files from cancelled folders
+                    if file_record.folder_id in self.state.cancelled_folders:
+                        logger.info("Skipping deep processing for cancelled folder: %s", file_record.folder_id)
+                        # We need to mark it as skipped/done or it will be picked up again
+                        # Actually, just returning True will re-evaluate from Priority 1.
+                        # If the folder was deleted, it won't be in 'ready' next time.
+                        return True
+
                     logger.info("Processing %s for deep", file_record.name)
 
                     await self.state.pause_event.wait()

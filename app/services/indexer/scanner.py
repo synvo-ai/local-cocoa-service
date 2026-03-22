@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from core.config import settings
-from core.models import FileRecord, FolderRecord, FailedFile, infer_kind
+from core.models import FileRecord, FolderRecord, FailedFile, infer_kind, SUPPORTED_EXTENSIONS
 from services.storage import IndexStorage
 
 logger = logging.getLogger(__name__)
@@ -36,6 +36,10 @@ class Scanner:
     """Handles file discovery, filtering, and registration."""
 
     def __init__(self, storage: IndexStorage) -> None:
+        self.allowed_extensions = settings.supported_extensions
+        if self.allowed_extensions is None:
+            # Fallback to all extensions defined in SUPPORTED_EXTENSIONS
+           self.allowed_extensions = list(SUPPORTED_EXTENSIONS.keys())
         self.storage = storage
 
     def iter_files(self, base: Path, *, max_files: Optional[int] = None) -> Iterable[Path]:
@@ -62,6 +66,12 @@ class Scanner:
                 path = Path(current_root) / filename
                 if not path.is_file():
                     continue
+
+                # Filter by extension
+                extension = path.suffix.lower().lstrip(".")
+                if extension not in self.allowed_extensions:
+                    continue
+
                 yield path
                 file_count += 1
                 if max_files is not None and file_count >= max_files:

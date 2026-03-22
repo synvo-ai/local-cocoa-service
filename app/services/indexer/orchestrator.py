@@ -152,6 +152,15 @@ class Indexer:
     def cancel_folder(self, folder_id: str) -> None:
         """Mark a folder as cancelled to stop processing it."""
         self.state.cancel_folder(folder_id)
+        # Also clear any pending paths in the state to update UI immediately
+        if folder_id in self.state.pending_paths:
+            self.state.pending_paths.pop(folder_id, None)
+            logger.info("Cleared pending paths for cancelled folder: %s", folder_id)
+        
+        # If the folder is active, reset it too
+        if self.state.active_folder and self.state.active_folder.id == folder_id:
+            logger.info("Resetting active state for cancelled folder: %s", folder_id)
+            self.state.reset_active_state()
 
     def status(self) -> IndexProgress:
         return self.state.status()

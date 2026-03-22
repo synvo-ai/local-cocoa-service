@@ -23,7 +23,12 @@ router = APIRouter(tags=["plugin-mail"])
 
 async def on_startup(app: FastAPI):
     """Lifecycle hook called when the plugin is started"""
-    pass
+    service = get_email_service()
+    # Perform universal maintenance on startup to ensure data integrity
+    try:
+        service.perform_maintenance()
+    except Exception as e:
+        logger.error("Email maintenance failed during startup: %s", e)
 
 
 async def on_stop(app: FastAPI):

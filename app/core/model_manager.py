@@ -281,7 +281,7 @@ class ModelManager:
 
         if model.type == ModelType.EMBEDDING:
             model_path = get_path("embedding", settings.paths.embedding_model)
-            return [
+            cmd = [
                 binary_path,
                 "-m", model_path,
                 "--embedding",
@@ -289,25 +289,40 @@ class ModelManager:
                 "--host", host,
                 "--port", str(model.port),
                 "-c", "8192", # Embeddings usually need smaller context unless specific
+                "-b", "2048",
+                "--ubatch-size", "2048",
                 "--threads", threads,
                 "-ngl", ngl,
-                "--log-disable"
             ]
+            if settings.embed_log_path:
+                log_p = Path(settings.embed_log_path)
+                log_p.parent.mkdir(parents=True, exist_ok=True)
+                cmd.extend(["--log-file", str(log_p)])
+            else:
+                cmd.append("--log-disable")
+            return cmd
 
         elif model.type == ModelType.RERANK:
             model_path = get_path("rerank", settings.paths.rerank_model)
             ubatch = os.getenv("RERANK_N_UBATCH", "2048")
-            return [
+            cmd = [
                 binary_path,
                 "-m", model_path,
                 "--reranking",
                 "--host", host,
                 "--port", str(model.port),
+                "-b", ubatch,
                 "--ubatch-size", ubatch,
                 "--threads", threads,
                 "-ngl", ngl,
-                "--log-disable"
             ]
+            if settings.rerank_log_path:
+                log_p = Path(settings.rerank_log_path)
+                log_p.parent.mkdir(parents=True, exist_ok=True)
+                cmd.extend(["--log-file", str(log_p)])
+            else:
+                cmd.append("--log-disable")
+            return cmd
 
         elif model.type == ModelType.VISION:
             model_path = get_path("vlm", settings.paths.vlm_model)
@@ -323,6 +338,11 @@ class ModelManager:
                 "-ngl", ngl,
                 "--jinja",
             ]
+            if settings.vlm_log_path:
+                log_p = Path(settings.vlm_log_path)
+                log_p.parent.mkdir(parents=True, exist_ok=True)
+                cmd.extend(["--log-file", str(log_p)])
+            
             cache_ram = os.getenv("LLAMA_PROMPT_CACHE", "0")
             if cache_ram != "0" and cache_ram != "false":
                 cmd.extend(["--cache-ram", cache_ram])
