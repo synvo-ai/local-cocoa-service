@@ -7,9 +7,8 @@ from pathlib import Path
 
 from core.config import settings
 from plugins.plugin_config import load_plugin_config
-from core.context import get_indexer, get_storage
+from core.models import FolderRecord, infer_kind
 from services.indexer import Indexer
-from services.storage import IndexStorage
 from .models import NoteContent, NoteCreate, NoteRecord, NoteSummary
 from .storage import NoteMixin
 
@@ -33,6 +32,7 @@ class NotesService(NoteMixin):
         _config = load_plugin_config(__file__)
         self._root = _config.storage_root
         self._root.mkdir(parents=True, exist_ok=True)
+        self._ensure_notes_folder()
 
     def list_notes(self) -> list[NoteSummary]:
         notes = self.db_list_notes()
@@ -59,6 +59,7 @@ class NotesService(NoteMixin):
         path.write_text(markdown, encoding="utf-8")
         record = NoteRecord(id=identifier, title=title, path=path, created_at=now, updated_at=now)
         self.db_upsert_note(record)
+        self._queue_note_for_indexing(path)
         preview = self._preview(path)
         return NoteSummary(id=record.id, title=record.title, updated_at=record.updated_at, preview=preview)
 
@@ -90,6 +91,7 @@ class NotesService(NoteMixin):
             updated_at=dt.datetime.now(dt.timezone.utc),
         )
         self.db_upsert_note(updated)
+        self._queue_note_for_indexing(updated.path)
         return NoteContent(
             id=updated.id,
             title=updated.title,
@@ -141,6 +143,79 @@ class NotesService(NoteMixin):
             return None
         snippet = [line for line in content.splitlines() if line.strip()][:lines]
         return "\n".join(snippet) if snippet else None
+
+    def _folder_id(self) -> str:
+        return f"notes::{self.plugin_id or 'notes'}"
+
+    def _ensure_notes_folder(self) -> FolderRecord:
+        now = dt.datetime.now(dt.timezone.utc)
+        folder_id = self._folder_id()
+        existing = self.get_folder(folder_id)
+        if existing:
+            updated = existing.copy(
+                update={
+                    "path": self._root,
+                    "label": "Notes",
+                    "updated_at": now,
+                    "enabled": True,
+                    "scan_mode": "full",
+                }
+            )
+            self.upsert_folder(updated)
+            return updated
+
+        folder = FolderRecord(
+            id=folder_id,
+            path=self._root,
+            label="Notes",
+            created_at=now,
+            updated_at=now,
+            enabled=True,
+            scan_mode="full",
+        )
+        self.upsert_folder(folder)
+        return folder
+
+    def _queue_note_for_indexing(self, path: Path) -> None:
+        folder = self._ensure_notes_folder()
+
+        try:
+            self.indexer.scanner.register_pending_files(folder, [path])
+            existing = self.get_file_by_path(path, check_privacy=False)
+            if existing:
+                stat = path.stat()
+                existing.folder_id = folder.id
+                existing.path = path
+                existing.name = path.name
+                existing.extension = path.suffix.lower().lstrip(".")
+                existing.size = stat.st_size
+                existing.modified_at = dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc)
+                existing.created_at = dt.datetime.fromtimestamp(stat.st_ctime, tz=dt.timezone.utc)
+                existing.kind = infer_kind(path)
+                existing.index_status = "pending"
+                existing.mime_type = None
+                existing.checksum_sha256 = None
+                existing.duration_seconds = None
+                existing.page_count = None
+                existing.preview_image = None
+                existing.summary = None
+                existing.embedding_vector = None
+                existing.embedding_determined_at = None
+                existing.metadata = {}
+                existing.error_reason = None
+                existing.error_at = None
+                existing.fast_stage = 0
+                existing.fast_text_at = None
+                existing.fast_embed_at = None
+                existing.deep_stage = 0
+                existing.deep_text_at = None
+                existing.deep_embed_at = None
+                self.upsert_file(existing)
+                self.reset_file_stages_by_path([str(path)], reset_fast=True, reset_deep=True)
+
+            self.indexer.signal_pending_files()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to queue note for indexing at %s: %s", path, exc)
 
 # Lazy initialization of service
 notes_service_global: Optional[NotesService] = None
