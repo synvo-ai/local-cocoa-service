@@ -27,7 +27,7 @@ class VideoSegment:
 class VideoParser(BaseParser):
     extensions = {"mp4", "mov", "mkv", "avi", "webm"}
 
-    def __init__(self, *, max_chars: int = 4000, segment_duration: int = 30, frames_per_segment: int = 8) -> None:
+    def __init__(self, *, max_chars: int = 10000, segment_duration: int = 30, frames_per_segment: int = 8) -> None:
         """
         Initialize VideoParser.
 

@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class AudioParser(BaseParser):
     extensions = {"mp3", "wav", "m4a", "flac", "aac", "ogg"}
 
-    def __init__(self, *, ffmpeg_binary: str = "ffmpeg", max_chars: int = 4000) -> None:
+    def __init__(self, *, ffmpeg_binary: str = "ffmpeg", max_chars: int = 10000) -> None:
         super().__init__(max_chars=max_chars)
         self.ffmpeg_binary = ffmpeg_binary
 

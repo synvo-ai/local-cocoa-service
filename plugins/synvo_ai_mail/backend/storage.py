@@ -65,6 +65,9 @@ class EmailMixin(StorageBase):
                 subject TEXT,
                 sender TEXT,
                 recipients TEXT,
+                to_recipients TEXT,
+                cc_recipients TEXT,
+                bcc_recipients TEXT,
                 sent_at TEXT,
                 stored_path TEXT NOT NULL,
                 size INTEGER NOT NULL,
@@ -95,6 +98,9 @@ class EmailMixin(StorageBase):
         add_account_column("last_sync_status", "TEXT")
         add_account_column("enabled", "INTEGER NOT NULL DEFAULT 1")
         add_message_column("recipients", "TEXT")
+        add_message_column("to_recipients", "TEXT")
+        add_message_column("cc_recipients", "TEXT")
+        add_message_column("bcc_recipients", "TEXT")
         add_message_column("created_at", "TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP")
         # Memory build status columns
         add_message_column("memory_status", "TEXT")  # 'pending', 'success', 'failed'
@@ -200,8 +206,10 @@ class EmailMixin(StorageBase):
             conn.execute(
                 f"""
                 INSERT OR IGNORE INTO {message_table} (
-                    id, account_id, external_id, subject, sender, recipients, sent_at, stored_path, size, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    id, account_id, external_id, subject, sender, recipients,
+                    to_recipients, cc_recipients, bcc_recipients,
+                    sent_at, stored_path, size, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     record.id,
@@ -210,6 +218,9 @@ class EmailMixin(StorageBase):
                     record.subject,
                     record.sender,
                     json.dumps(record.recipients, ensure_ascii=False),
+                    json.dumps(record.to_recipients, ensure_ascii=False),
+                    json.dumps(record.cc_recipients, ensure_ascii=False),
+                    json.dumps(record.bcc_recipients, ensure_ascii=False),
                     record.sent_at.isoformat() if record.sent_at else None,
                     str(record.stored_path),
                     record.size,
@@ -352,17 +363,25 @@ class EmailMixin(StorageBase):
         )
 
     @staticmethod
+    def _parse_json_list(payload) -> list[str]:
+        """Parse a JSON-encoded list from a DB column, defaulting to []."""
+        if not payload:
+            return []
+        try:
+            data = json.loads(payload)
+            if isinstance(data, list):
+                return [str(item) for item in data]
+        except json.JSONDecodeError:
+            return [str(payload)]
+        return []
+
+    @staticmethod
     def _row_to_email_message(row: sqlite3.Row) -> EmailMessageRecord:
-        recipients_payload = row["recipients"]
-        recipients: list[str] = []
-        if recipients_payload:
-            try:
-                data = json.loads(recipients_payload)
-                if isinstance(data, list):
-                    recipients = [str(item) for item in data]
-            except json.JSONDecodeError:
-                recipients = [str(recipients_payload)]
         keys = row.keys()
+        recipients = EmailMixin._parse_json_list(row["recipients"])
+        to_recipients = EmailMixin._parse_json_list(row["to_recipients"] if "to_recipients" in keys else None)
+        cc_recipients = EmailMixin._parse_json_list(row["cc_recipients"] if "cc_recipients" in keys else None)
+        bcc_recipients = EmailMixin._parse_json_list(row["bcc_recipients"] if "bcc_recipients" in keys else None)
         return EmailMessageRecord(
             id=row["id"],
             account_id=row["account_id"],
@@ -370,6 +389,9 @@ class EmailMixin(StorageBase):
             subject=row["subject"],
             sender=row["sender"],
             recipients=recipients,
+            to_recipients=to_recipients,
+            cc_recipients=cc_recipients,
+            bcc_recipients=bcc_recipients,
             sent_at=dt.datetime.fromisoformat(row["sent_at"].replace('Z', '+00:00')) if row["sent_at"] else None,
             stored_path=Path(row["stored_path"]),
             size=int(row["size"]),

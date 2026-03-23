@@ -90,6 +90,9 @@ class EmailMessageRecord(BaseModel):
     subject: Optional[str]
     sender: Optional[str]
     recipients: list[str] = Field(default_factory=list)
+    to_recipients: list[str] = Field(default_factory=list)
+    cc_recipients: list[str] = Field(default_factory=list)
+    bcc_recipients: list[str] = Field(default_factory=list)
     sent_at: Optional[dt.datetime]
     stored_path: Path
     size: int
@@ -110,6 +113,9 @@ class EmailMessageSummary(BaseModel):
     subject: Optional[str]
     sender: Optional[str]
     recipients: list[str] = Field(default_factory=list)
+    to_recipients: list[str] = Field(default_factory=list)
+    cc_recipients: list[str] = Field(default_factory=list)
+    bcc_recipients: list[str] = Field(default_factory=list)
     sent_at: Optional[dt.datetime]
     stored_path: Path
     size: int

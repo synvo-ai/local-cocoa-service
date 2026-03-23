@@ -308,15 +308,17 @@ class EmailService(EmailMixin):
 
                 date_val = msg.received_date_time
 
-                recipients: list[str] = []
+                to_recipients: list[str] = []
+                cc_recipients: list[str] = []
+                bcc_recipients: list[str] = []
                 if msg.to_recipients:
-                    recipients.extend(
-                        [r.email_address.address for r in msg.to_recipients if r.email_address]
-                    )
+                    to_recipients = [r.email_address.address for r in msg.to_recipients if r.email_address]
                 if msg.cc_recipients:
-                    recipients.extend(
-                        [r.email_address.address for r in msg.cc_recipients if r.email_address]
-                    )
+                    cc_recipients = [r.email_address.address for r in msg.cc_recipients if r.email_address]
+                if getattr(msg, 'bcc_recipients', None):
+                    bcc_recipients = [r.email_address.address for r in msg.bcc_recipients if r.email_address]
+                # Keep merged list for backward compatibility (memory/embedding)
+                recipients = to_recipients + cc_recipients + bcc_recipients
 
                 # Process body content
                 body_content = ""
@@ -335,7 +337,7 @@ class EmailService(EmailMixin):
                 safe_id = "".join(c for c in msg.id if c.isalnum())
                 file_name = f"{ts}_{safe_id}.md"
                 file_path = folder_path / file_name
-                self._write_markdown(file_path, subject, sender, recipients, date_val, body_content)
+                self._write_markdown(file_path, subject, sender, to_recipients, cc_recipients, bcc_recipients, date_val, body_content)
                 file_size = file_path.stat().st_size
 
                 record = EmailMessageRecord(
@@ -345,6 +347,9 @@ class EmailService(EmailMixin):
                     subject=subject,
                     sender=sender,
                     recipients=recipients,
+                    to_recipients=to_recipients,
+                    cc_recipients=cc_recipients,
+                    bcc_recipients=bcc_recipients,
                     sent_at=date_val or dt.datetime.now(dt.timezone.utc),
                     stored_path=file_path,
                     size=file_size,
@@ -680,13 +685,18 @@ class EmailService(EmailMixin):
         sent_at = self._parse_date(message.get("Date"))
         subject = message.get("Subject")
         sender = message.get("From")
-        recipients = self._collect_recipients(message)
+        separated = self._collect_recipients_separated(message)
+        to_recipients = separated["to"]
+        cc_recipients = separated["cc"]
+        bcc_recipients = separated["bcc"]
+        # Keep merged list for backward compatibility (memory/embedding)
+        recipients = to_recipients + cc_recipients + bcc_recipients
 
         timestamp = (sent_at or dt.datetime.now(dt.timezone.utc)).strftime("%Y%m%d-%H%M%S")
         slug = self._slugify(subject or "message")
         filename = f"{timestamp}-{slug}-{uuid.uuid4().hex[:8]}.md"
         target_path = spool_path / filename
-        self._write_markdown(target_path, subject, sender, recipients, sent_at, body_text)
+        self._write_markdown(target_path, subject, sender, to_recipients, cc_recipients, bcc_recipients, sent_at, body_text)
 
         return EmailMessageRecord(
             id=uuid.uuid4().hex,
@@ -695,6 +705,9 @@ class EmailService(EmailMixin):
             subject=subject,
             sender=sender,
             recipients=recipients,
+            to_recipients=to_recipients,
+            cc_recipients=cc_recipients,
+            bcc_recipients=bcc_recipients,
             sent_at=sent_at,
             stored_path=target_path,
             size=len(message_bytes),
@@ -783,16 +796,21 @@ class EmailService(EmailMixin):
             raise EmailServiceError("Stored credentials are corrupted.") from exc
 
     @staticmethod
-    def _collect_recipients(message: EmailMessage) -> list[str]:
-        fields = []
-        for header in ("To", "Cc", "Bcc"):
+    def _collect_recipients_separated(message: EmailMessage) -> dict[str, list[str]]:
+        """Return To, CC, BCC as separate lists."""
+        result: dict[str, list[str]] = {"to": [], "cc": [], "bcc": []}
+        for header, key in (("To", "to"), ("Cc", "cc"), ("Bcc", "bcc")):
             value = message.get(header)
             if value:
-                fields.append(value)
-        if not fields:
-            return []
-        addresses = getaddresses(fields)
-        return [addr for _, addr in addresses if addr]
+                addresses = getaddresses([value])
+                result[key] = [addr for _, addr in addresses if addr]
+        return result
+
+    @staticmethod
+    def _collect_recipients(message: EmailMessage) -> list[str]:
+        """Return all recipients as a flat list (backward compat)."""
+        separated = EmailService._collect_recipients_separated(message)
+        return separated["to"] + separated["cc"] + separated["bcc"]
 
     @staticmethod
     def _parse_date(value: Optional[str]) -> Optional[dt.datetime]:
@@ -876,19 +894,30 @@ class EmailService(EmailMixin):
         path: Path,
         subject: Optional[str],
         sender: Optional[str],
-        recipients: Iterable[str],
+        to_recipients: Iterable[str],
+        cc_recipients: Iterable[str],
+        bcc_recipients: Iterable[str],
         sent_at: Optional[dt.datetime],
         body_text: str,
     ) -> None:
+        to_list = list(to_recipients)
+        cc_list = list(cc_recipients)
+        bcc_list = list(bcc_recipients)
         lines = [
             f"# {subject.strip() if subject else 'Untitled message'}",
             "",
             f"- From: {sender or 'Unknown sender'}",
-            f"- To: {', '.join(recipients) if recipients else 'Unknown recipients'}",
+            f"- To: {', '.join(to_list) if to_list else 'Unknown recipients'}",
+        ]
+        if cc_list:
+            lines.append(f"- CC: {', '.join(cc_list)}")
+        if bcc_list:
+            lines.append(f"- BCC: {', '.join(bcc_list)}")
+        lines.extend([
             f"- Date: {sent_at.isoformat() if sent_at else 'Unknown'}",
             "",
             body_text.strip() or '_No body content available._',
-        ]
+        ])
         path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
     @staticmethod
@@ -914,6 +943,9 @@ class EmailService(EmailMixin):
             subject=record.subject,
             sender=record.sender,
             recipients=record.recipients,
+            to_recipients=record.to_recipients,
+            cc_recipients=record.cc_recipients,
+            bcc_recipients=record.bcc_recipients,
             sent_at=record.sent_at,
             stored_path=record.stored_path,
             size=record.size,

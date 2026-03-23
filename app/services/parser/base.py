@@ -40,7 +40,7 @@ class ParsedContent:
 class BaseParser(abc.ABC):
     extensions: set[str] = set()
 
-    def __init__(self, *, max_chars: int = 4000) -> None:
+    def __init__(self, *, max_chars: int = 10000) -> None:
         self.max_chars = max_chars
         self.md = MarkItDown()
 
