@@ -66,38 +66,8 @@ LIST_FILES = ToolSpec(
     ],
 )
 
-LIST_NOTES = ToolSpec(
-    name="list_notes",
-    description=(
-        "List all notes in the user's notes collection. Returns note titles, "
-        "IDs, and short previews."
-    ),
-    parameters=[],
-)
-
-GET_NOTE = ToolSpec(
-    name="get_note",
-    description="Get the full content of a specific note by its ID.",
-    parameters=[
-        ToolParameter(name="note_id", type="string", description="The note ID to retrieve"),
-    ],
-)
-
 
 # ── Side-effect tools ───────────────────────────────────────────────────
-
-CREATE_NOTE = ToolSpec(
-    name="create_note",
-    description=(
-        "Create a new note. Returns the created note summary with its ID. "
-        "Use this when the user explicitly asks you to save or write down something."
-    ),
-    parameters=[
-        ToolParameter(name="title", type="string", description="Title of the note"),
-        ToolParameter(name="body", type="string", description="Markdown body content of the note"),
-    ],
-    side_effect=True,
-)
 
 LIST_EMAIL_ACCOUNTS = ToolSpec(
     name="list_email_accounts",
@@ -144,9 +114,6 @@ ALL_TOOLS: list[ToolSpec] = [
     WORKSPACE_SEARCH,
     GET_DOCUMENT_CHUNKS,
     LIST_FILES,
-    LIST_NOTES,
-    GET_NOTE,
-    CREATE_NOTE,
     LIST_EMAIL_ACCOUNTS,
     SEARCH_EMAILS,
     SEND_EMAIL,

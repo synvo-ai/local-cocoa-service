@@ -70,6 +70,50 @@ class StandardPipeline:
         
         return deduped
 
+    def _dedupe_hits_by_email(self, hits: List[Any]) -> List[Any]:
+        """
+        Deduplicate hits from the same email file.
+        For email files (in email:: folders), keeps only the highest-scoring hit
+        per file_id, since the full email will be used as context anyway.
+        """
+        if not hits:
+            return hits
+
+        file_folder_cache: Dict[str, str] = {}
+        email_best: Dict[str, Any] = {}
+        non_email: List[Any] = []
+
+        for hit in hits:
+            file_id = hit.file_id
+            if file_id not in file_folder_cache:
+                try:
+                    record = self.engine.storage.get_file(file_id, check_privacy=False)
+                    file_folder_cache[file_id] = record.folder_id if record else ""
+                except Exception:
+                    file_folder_cache[file_id] = ""
+
+            if file_folder_cache[file_id].startswith("email::"):
+                existing = email_best.get(file_id)
+                if existing is None or hit.score > existing.score:
+                    email_best[file_id] = hit
+            else:
+                non_email.append(hit)
+
+        result = non_email + list(email_best.values())
+        result.sort(key=lambda h: h.score if hasattr(h, 'score') else 0, reverse=True)
+        return result
+
+    def _get_full_email_text(self, file_id: str) -> str:
+        """Get the full text of an email by combining all its chunks in order."""
+        try:
+            chunks = self.engine.storage.chunks_for_file(file_id)
+            if not chunks:
+                return ""
+            return "\n".join(chunk.text for chunk in chunks if chunk.text).strip()
+        except Exception as e:
+            logger.warning(f"Failed to get full email text for file {file_id}: {e}")
+            return ""
+
     async def _process_hits_generator(
         self,
         query: str,
@@ -105,6 +149,26 @@ class StandardPipeline:
         deduped_hits = self._dedupe_hits_by_page(hits)
         logger.info(f"[PAGE DEDUP] Deduplicated {len(hits)} hits to {len(deduped_hits)} unique pages")
 
+        # Email dedup: keep one hit per email file and pre-fetch full email text
+        email_full_text_cache: Dict[str, str] = {}
+        pre_email_count = len(deduped_hits)
+        deduped_hits = self._dedupe_hits_by_email(deduped_hits)
+        if len(deduped_hits) < pre_email_count:
+            logger.info(f"[EMAIL DEDUP] Deduplicated {pre_email_count} hits to {len(deduped_hits)} (email dedup)")
+
+        # Pre-fetch full email text for email files
+        for hit in deduped_hits:
+            file_id = hit.file_id
+            if file_id not in email_full_text_cache:
+                try:
+                    record = self.engine.storage.get_file(file_id, check_privacy=False)
+                    if record and hasattr(record, 'folder_id') and record.folder_id.startswith("email::"):
+                        full_text = self._get_full_email_text(file_id)
+                        if full_text:
+                            email_full_text_cache[file_id] = full_text
+                except Exception:
+                    pass
+
         # Inject indices
         for i, hit in enumerate(deduped_hits):
             if hit.metadata is None: hit.metadata = {}
@@ -117,7 +181,12 @@ class StandardPipeline:
         context_parts = []
         for i, hit in enumerate(deduped_hits):
              idx = start_index + i
-             chunk_text = self.engine._chunk_text(hit)
+
+             # For email files, use the full email text instead of the chunk fragment
+             if hit.file_id in email_full_text_cache:
+                 chunk_text = email_full_text_cache[hit.file_id]
+             else:
+                 chunk_text = self.engine._chunk_text(hit)
              
              kind = hit.metadata.get("kind") if hit.metadata else None
              if kind == "image":
@@ -346,10 +415,11 @@ class StandardPipeline:
         except Exception as e:
             logger.warning(f"Keyword search failed: {e}")
 
-        # Deduplicate keyword hits by page BEFORE emitting thinking_step
+        # Deduplicate keyword hits by page and email BEFORE emitting thinking_step
         # This ensures consistent index assignment between thinking_step and _process_hits_generator
         keyword_hits_deduped = self._dedupe_hits_by_page(keyword_hits) if keyword_hits else []
-        logger.debug(f"Keyword hits: {len(keyword_hits)} -> {len(keyword_hits_deduped)} after page dedup")
+        keyword_hits_deduped = self._dedupe_hits_by_email(keyword_hits_deduped)
+        logger.debug(f"Keyword hits: {len(keyword_hits)} -> {len(keyword_hits_deduped)} after page+email dedup")
 
         # Assign global indices to deduped hits BEFORE emitting thinking_step
         for i, hit in enumerate(keyword_hits_deduped):
@@ -423,9 +493,10 @@ class StandardPipeline:
         combined_exclusions = local_processed_chunk_ids | all_excluded
         unique_semantic_hits = [h for h in semantic_hits if h.chunk_id not in combined_exclusions]
         
-        # Deduplicate semantic hits by page BEFORE emitting thinking_step
+        # Deduplicate semantic hits by page and email BEFORE emitting thinking_step
         semantic_hits_deduped = self._dedupe_hits_by_page(unique_semantic_hits) if unique_semantic_hits else []
-        logger.debug(f"Semantic hits: {len(unique_semantic_hits)} -> {len(semantic_hits_deduped)} after page dedup")
+        semantic_hits_deduped = self._dedupe_hits_by_email(semantic_hits_deduped)
+        logger.debug(f"Semantic hits: {len(unique_semantic_hits)} -> {len(semantic_hits_deduped)} after page+email dedup")
 
         # Assign global indices to deduped semantic hits BEFORE emitting thinking_step
         for i, hit in enumerate(semantic_hits_deduped):

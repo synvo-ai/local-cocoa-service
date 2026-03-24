@@ -133,58 +133,6 @@ async def execute_list_files(args: dict[str, Any]) -> str:
     return json.dumps({"total": total, "files": file_list[:limit]}, ensure_ascii=False)
 
 
-async def execute_list_notes(args: dict[str, Any]) -> str:
-    """List all notes via the notes plugin service."""
-    try:
-        notes_service = get_service("synvo_ai_notes")
-        if not notes_service:
-            raise RuntimeError("Notes plugin is not installed/running.")
-        notes = notes_service.list_notes()
-        return json.dumps([
-            {"id": n.id, "title": n.title, "preview": n.preview}
-            for n in notes
-        ], ensure_ascii=False)
-    except ImportError:
-        return json.dumps({"notes": [], "message": "Notes plugin is not installed."})
-    except Exception as exc:
-        return json.dumps({"error": f"Notes service unavailable: {exc}"})
-
-
-async def execute_get_note(args: dict[str, Any]) -> str:
-    """Get a specific note by ID."""
-    note_id = args.get("note_id", "")
-    try:
-        notes_service = get_service("synvo_ai_notes")
-        if not notes_service:
-            raise RuntimeError("Notes plugin is not installed/running.")
-        note = notes_service.get_note(note_id)
-        return json.dumps({
-            "id": note.id,
-            "title": note.title,
-            "markdown": note.markdown[:4000],
-        }, ensure_ascii=False)
-    except ImportError:
-        return json.dumps({"error": "Notes plugin is not installed."})
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
-
-
-async def execute_create_note(args: dict[str, Any]) -> str:
-    """Create a new note."""
-    try:
-        from plugins.synvo_ai_notes.backend.models import NoteCreate
-        notes_service = get_service("synvo_ai_notes")
-        if not notes_service:
-            raise RuntimeError("Notes plugin is not installed/running.")
-        payload = NoteCreate(title=args.get("title"), body=args.get("body"))
-        result = notes_service.create_note(payload)
-        return json.dumps({"id": result.id, "title": result.title}, ensure_ascii=False)
-    except ImportError:
-        return json.dumps({"error": "Notes plugin is not installed."})
-    except Exception as exc:
-        return json.dumps({"error": str(exc)})
-
-
 # ── Executor map ────────────────────────────────────────────────────────
 
 
@@ -269,9 +217,6 @@ TOOL_EXECUTORS: dict[str, Any] = {
     "get_document_chunks": execute_get_document_chunks,
     "workspace_qa": execute_workspace_qa,
     "list_files": execute_list_files,
-    "list_notes": execute_list_notes,
-    "get_note": execute_get_note,
-    "create_note": execute_create_note,
     "list_email_accounts": execute_list_email_accounts,
     "search_emails": execute_search_emails,
     "send_email": execute_send_email,
